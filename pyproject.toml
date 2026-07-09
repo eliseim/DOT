@@ -17,6 +17,9 @@ dev = [
     "pytest",
     "ruff",
 ]
+gui = [
+    "matplotlib>=3.7",
+]
 optimization = [
     "pymoo>=0.6",
 ]

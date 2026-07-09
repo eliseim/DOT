@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import copy
+import tkinter as tk
+
+import pytest
+
+from dot.gui import target_synthesis_gui
+
+
+class FakeVar:
+    def __init__(self, value="") -> None:  # noqa: ANN001
+        self.value = value
+
+    def get(self):  # noqa: ANN201
+        if isinstance(self.value, BaseException):
+            raise self.value
+        return self.value
+
+    def set(self, value) -> None:  # noqa: ANN001
+        self.value = value
+
+
+def test_state_round_trips_loaded_feasibility(monkeypatch) -> None:  # noqa: ANN001
+    app = _app_shell()
+    loaded_state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
+    loaded_state["feasibility"] = {
+        "min_gap_mm": 0.25,
+        "max_angle_deg": 65.0,
+        "min_layer_clearance_mm": 0.5,
+    }
+
+    monkeypatch.setattr(target_synthesis_gui.tk, "StringVar", FakeVar)
+    monkeypatch.setattr(target_synthesis_gui.App, "_sync_layer_rows", lambda self: None)
+
+    target_synthesis_gui.App._apply_state(app, loaded_state)
+
+    assert target_synthesis_gui.App._state(app)["feasibility"] == loaded_state["feasibility"]
+
+
+@pytest.mark.parametrize("raw_n_layers", [0, -2])
+def test_state_clamps_layer_count_to_match_visible_rows(raw_n_layers: int) -> None:
+    app = _app_shell()
+    app.n_layers_var.set(raw_n_layers)
+    app.layer_vars = [_layer_vars(index) for index in range(2)]
+
+    state = target_synthesis_gui.App._state(app)
+
+    assert state["n_layers"] == 1
+    assert len(state["layers"]) == 1
+
+
+def test_run_campaign_shows_validation_dialog_for_tclerror(monkeypatch) -> None:  # noqa: ANN001
+    app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    dialogs = []
+
+    app._campaign_inputs = lambda: (_ for _ in ()).throw(tk.TclError("invalid integer"))
+    monkeypatch.setattr(
+        target_synthesis_gui.messagebox,
+        "showerror",
+        lambda title, message: dialogs.append((title, message)),
+    )
+
+    target_synthesis_gui.App._run_campaign(app)
+
+    assert dialogs == [("Invalid campaign inputs", "invalid integer")]
+
+
+@pytest.mark.parametrize("cadata_path", ["", "missing.cadata"])
+def test_campaign_inputs_requires_existing_cadata_file(cadata_path: str) -> None:
+    app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
+    state["layers"][0]["cadata_path"] = cadata_path
+    app._state = lambda: state
+
+    with pytest.raises(ValueError, match=r"Please select a \.cadata file for Layer 1"):
+        target_synthesis_gui.App._campaign_inputs(app)
+
+
+def _app_shell():
+    app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    app.target_field_var = FakeVar("0.02")
+    app.aperture_var = FakeVar("8.0")
+    app.n_layers_var = FakeVar(1)
+    app.temperature_var = FakeVar("0.0")
+    app.max_harmonic_var = FakeVar("1000.0")
+    app.min_margin_var = FakeVar("10.0")
+    app.pop_size_var = FakeVar("8")
+    app.n_gen_var = FakeVar("3")
+    app.seed_var = FakeVar("7")
+    app.feasibility_settings = dict(target_synthesis_gui.DEFAULT_STATE["feasibility"])
+    app.layer_vars = [_layer_vars(0)]
+    return app
+
+
+def _layer_vars(index: int) -> dict[str, FakeVar]:
+    layer = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE["layers"][0])
+    layer["cadata_path"] = f"layer-{index + 1}.cadata"
+    return {key: FakeVar(str(value)) for key, value in layer.items()}
