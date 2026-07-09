@@ -48,6 +48,8 @@ def test_state_uses_per_layer_angle_and_current_defaults() -> None:
 
     assert state["acceptance"]["max_current_a"] == pytest.approx(13000.0)
     assert state["feasibility"]["max_angle_deg"] == (80.0, 85.0, 85.0)
+    assert state["layers"][0]["alpha_min_deg"] == pytest.approx(-10.0)
+    assert state["layers"][0]["alpha_max_deg"] == pytest.approx(70.0)
 
 
 @pytest.mark.parametrize("raw_n_layers", [0, -2])
@@ -111,6 +113,7 @@ CABLE 1
     topology, targets, _ = target_synthesis_gui.App._campaign_inputs(app)
 
     assert topology.cables["layer-1"].width_mm == pytest.approx(1.9)
+    assert topology.layers[0].alpha_bounds_deg == pytest.approx((-10.0, 70.0))
     assert targets.cadata_by_layer[0].remfit.c1 == 3.0e9
 
 
@@ -143,6 +146,8 @@ CONDUCTOR 2
     state["layers"][1]["conductor_name"] = "LF"
     state["layers"][1]["inner_radius_min_mm"] = 24.0
     state["layers"][1]["inner_radius_max_mm"] = 26.0
+    state["layers"][1]["alpha_min_deg"] = -5.0
+    state["layers"][1]["alpha_max_deg"] = 65.0
     state["layers"][1]["max_angle_deg"] = 85.0
     state["acceptance"]["max_current_a"] = 12345.0
     app._state = lambda: state
@@ -151,6 +156,8 @@ CONDUCTOR 2
 
     assert topology.cables["layer-1"].width_mm == pytest.approx(2.0)
     assert topology.cables["layer-2"].width_mm == pytest.approx(5.0)
+    assert topology.layers[0].alpha_bounds_deg == pytest.approx((-10.0, 70.0))
+    assert topology.layers[1].alpha_bounds_deg == pytest.approx((-5.0, 65.0))
     assert targets.max_current_a == pytest.approx(12345.0)
     assert feasibility.max_angle_deg == (80.0, 85.0)
     assert targets.cadata_by_layer[0] is None

@@ -3,8 +3,9 @@
 The topology is fixed by the caller: layer count, block count per layer, and
 the cable assigned to each layer are not search variables.  The genome stores
 one continuous inner radius per layer and, per block, one continuous azimuthal
-angle plus one integer turn count.  Block ``alpha_deg`` is fixed to zero here as
-an intentional simplification for the first optimizer core.
+angle plus one integer turn count.  The first block in each layer has
+``alpha_deg`` fixed to zero and no genome slot; later blocks also store one
+continuous ``alpha_deg`` value.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import numpy as np
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 
+DEFAULT_ALPHA_BOUNDS_DEG = (-10.0, 70.0)
+
 
 @dataclass(frozen=True, slots=True)
 class LayerTopology:
@@ -27,6 +30,7 @@ class LayerTopology:
     inner_radius_bounds_mm: tuple[float, float]
     phi_bounds_deg: tuple[float, float]
     n_turns_bounds: tuple[int, int]
+    alpha_bounds_deg: tuple[float, float] = DEFAULT_ALPHA_BOUNDS_DEG
 
     def __post_init__(self) -> None:
         if not self.cable_id:
@@ -34,6 +38,7 @@ class LayerTopology:
         _require_positive_int(self.n_blocks, "n_blocks")
         _require_ordered_float_bounds(self.inner_radius_bounds_mm, "inner_radius_bounds_mm")
         _require_ordered_float_bounds(self.phi_bounds_deg, "phi_bounds_deg")
+        _require_ordered_float_bounds(self.alpha_bounds_deg, "alpha_bounds_deg")
         lower, upper = self.n_turns_bounds
         _require_positive_int(lower, "n_turns_bounds lower")
         _require_positive_int(upper, "n_turns_bounds upper")
@@ -56,7 +61,7 @@ class Topology:
 
     @property
     def n_var(self) -> int:
-        return sum(1 + 2 * layer.n_blocks for layer in self.layers)
+        return sum(1 + 2 + 3 * (layer.n_blocks - 1) for layer in self.layers)
 
 
 def encode(design: DipoleDesign) -> np.ndarray:
@@ -65,9 +70,11 @@ def encode(design: DipoleDesign) -> np.ndarray:
     values: list[float] = []
     for layer in design.layers:
         values.append(layer.inner_radius_mm)
-        for block in layer.blocks:
+        for block_index, block in enumerate(layer.blocks):
             values.append(block.phi_deg)
             values.append(float(block.n_turns))
+            if block_index > 0:
+                values.append(block.alpha_deg)
     return np.asarray(values, dtype=float)
 
 
@@ -96,7 +103,7 @@ def decode(
         index += 1
         cable = cables[layer_topology.cable_id]
         blocks: list[Block] = []
-        for _ in range(layer_topology.n_blocks):
+        for block_index in range(layer_topology.n_blocks):
             phi_deg = float(values[index])
             _require_finite(phi_deg, "phi_deg")
             raw_turns = values[index + 1]
@@ -106,17 +113,23 @@ def decode(
                 layer_topology.n_turns_bounds[1],
                 max(layer_topology.n_turns_bounds[0], n_turns),
             )
+            index += 2
+            if block_index == 0:
+                alpha_deg = 0.0
+            else:
+                alpha_deg = float(values[index])
+                _require_finite(alpha_deg, "alpha_deg")
+                index += 1
             blocks.append(
                 Block(
                     phi_deg=phi_deg,
-                    alpha_deg=0.0,
+                    alpha_deg=alpha_deg,
                     n_turns=n_turns,
                     cable=cable,
                     inner_radius_mm=inner_radius_mm,
                     current_a=1.0,
                 )
             )
-            index += 2
         layers.append(Layer(inner_radius_mm=inner_radius_mm, blocks=tuple(blocks)))
     return DipoleDesign(aperture_radius_mm=topology.aperture_radius_mm, layers=tuple(layers))
 
@@ -129,9 +142,12 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
     for layer in topology.layers:
         lower.append(layer.inner_radius_bounds_mm[0])
         upper.append(layer.inner_radius_bounds_mm[1])
-        for _ in range(layer.n_blocks):
+        for block_index in range(layer.n_blocks):
             lower.extend((layer.phi_bounds_deg[0], float(layer.n_turns_bounds[0])))
             upper.extend((layer.phi_bounds_deg[1], float(layer.n_turns_bounds[1])))
+            if block_index > 0:
+                lower.append(layer.alpha_bounds_deg[0])
+                upper.append(layer.alpha_bounds_deg[1])
     return np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
 
 
