@@ -39,6 +39,22 @@ def test_state_round_trips_loaded_feasibility(monkeypatch) -> None:  # noqa: ANN
     assert target_synthesis_gui.App._state(app)["feasibility"] == loaded_state["feasibility"]
 
 
+def test_apply_state_defaults_missing_campaign_fields(monkeypatch) -> None:  # noqa: ANN001
+    app = _app_shell()
+    loaded_state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
+    loaded_state.pop("campaign_name")
+    loaded_state.pop("output_dir")
+
+    monkeypatch.setattr(target_synthesis_gui.tk, "StringVar", FakeVar)
+    monkeypatch.setattr(target_synthesis_gui.App, "_sync_layer_rows", lambda self: None)
+
+    target_synthesis_gui.App._apply_state(app, loaded_state)
+    state = target_synthesis_gui.App._state(app)
+
+    assert state["campaign_name"] == target_synthesis_gui.DEFAULT_STATE["campaign_name"]
+    assert state["output_dir"] == target_synthesis_gui.DEFAULT_STATE["output_dir"]
+
+
 def test_state_uses_per_layer_angle_and_current_defaults() -> None:
     app = _app_shell()
     app.n_layers_var.set(3)
@@ -47,6 +63,8 @@ def test_state_uses_per_layer_angle_and_current_defaults() -> None:
     state = target_synthesis_gui.App._state(app)
 
     assert state["acceptance"]["max_current_a"] == pytest.approx(13000.0)
+    assert state["feasibility"]["min_gap_mm"] == pytest.approx(0.15)
+    assert state["feasibility"]["min_layer_clearance_mm"] == pytest.approx(0.5)
     assert state["feasibility"]["max_angle_deg"] == (80.0, 85.0, 85.0)
     assert state["layers"][0]["alpha_min_deg"] == pytest.approx(-10.0)
     assert state["layers"][0]["alpha_max_deg"] == pytest.approx(70.0)
@@ -62,6 +80,24 @@ def test_state_clamps_layer_count_to_match_visible_rows(raw_n_layers: int) -> No
 
     assert state["n_layers"] == 1
     assert len(state["layers"]) == 1
+
+
+def test_save_config_defaults_to_campaign_output_dir(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    app = _app_shell()
+    app.campaign_name_var.set("CTH Study 01")
+    app.output_dir_var.set(str(tmp_path))
+    captured = {}
+
+    def fake_asksaveasfilename(**options):  # noqa: ANN001, ANN202
+        captured.update(options)
+        return ""
+
+    monkeypatch.setattr(target_synthesis_gui.filedialog, "asksaveasfilename", fake_asksaveasfilename)
+
+    target_synthesis_gui.App._save_config(app)
+
+    assert captured["initialdir"] == str(tmp_path)
+    assert captured["initialfile"] == "CTH-Study-01.json"
 
 
 def test_run_campaign_shows_validation_dialog_for_tclerror(monkeypatch) -> None:  # noqa: ANN001
@@ -170,10 +206,16 @@ CONDUCTOR 2
 
 def _app_shell():
     app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    app.campaign_name_var = FakeVar(target_synthesis_gui.DEFAULT_STATE["campaign_name"])
+    app.output_dir_var = FakeVar(target_synthesis_gui.DEFAULT_STATE["output_dir"])
     app.target_field_var = FakeVar("0.02")
     app.aperture_var = FakeVar("8.0")
     app.n_layers_var = FakeVar(1)
     app.temperature_var = FakeVar("0.0")
+    app.min_gap_var = FakeVar(str(target_synthesis_gui.DEFAULT_STATE["feasibility"]["min_gap_mm"]))
+    app.min_layer_clearance_var = FakeVar(
+        str(target_synthesis_gui.DEFAULT_STATE["feasibility"]["min_layer_clearance_mm"])
+    )
     app.max_harmonic_var = FakeVar("1000.0")
     app.min_margin_var = FakeVar("10.0")
     app.max_current_var = FakeVar("13000.0")

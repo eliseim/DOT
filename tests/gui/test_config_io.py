@@ -5,6 +5,8 @@ from dot.gui.config_io import load_config, save_config
 
 def test_config_round_trips_form_state(tmp_path) -> None:  # noqa: ANN001
     state = {
+        "campaign_name": "cth-dipole",
+        "output_dir": str(tmp_path),
         "target_bore_field_t": 0.02,
         "aperture_radius_mm": 8.0,
         "layers": [

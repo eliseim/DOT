@@ -30,8 +30,12 @@ DEFAULT_MAX_CURRENT_A = 13000.0
 # Wide enough to cover CTH-like block tilts while avoiding extreme cable rotations.
 DEFAULT_ALPHA_MIN_DEG = -10.0
 DEFAULT_ALPHA_MAX_DEG = 70.0
+DEFAULT_CAMPAIGN_NAME = "dot-campaign"
+DEFAULT_OUTPUT_DIR = str(Path.cwd())
 
 DEFAULT_STATE: dict[str, Any] = {
+    "campaign_name": DEFAULT_CAMPAIGN_NAME,
+    "output_dir": DEFAULT_OUTPUT_DIR,
     "target_bore_field_t": 0.02,
     "aperture_radius_mm": 8.0,
     "n_layers": 1,
@@ -47,9 +51,9 @@ DEFAULT_STATE: dict[str, Any] = {
         "seed": 7,
     },
     "feasibility": {
-        "min_gap_mm": 0.1,
+        "min_gap_mm": 0.15,
         "max_angle_deg": (DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG,),
-        "min_layer_clearance_mm": 0.1,
+        "min_layer_clearance_mm": 0.5,
     },
     "layers": [
         {
@@ -84,10 +88,14 @@ class App(tk.Tk):
         self.feasibility_settings = dict(DEFAULT_STATE["feasibility"])
         self.plot_canvas: FigureCanvasTkAgg | None = None
 
+        self.campaign_name_var = tk.StringVar()
+        self.output_dir_var = tk.StringVar()
         self.target_field_var = tk.StringVar()
         self.aperture_var = tk.StringVar()
         self.n_layers_var = tk.IntVar()
         self.temperature_var = tk.StringVar()
+        self.min_gap_var = tk.StringVar()
+        self.min_layer_clearance_var = tk.StringVar()
         self.max_harmonic_var = tk.StringVar()
         self.min_margin_var = tk.StringVar()
         self.max_current_var = tk.StringVar()
@@ -116,16 +124,33 @@ class App(tk.Tk):
         output.columnconfigure(0, weight=1)
         output.rowconfigure(2, weight=1)
 
+        self._build_campaign(controls)
         self._build_physics(controls)
         self._build_layers(controls)
+        self._build_geometry(controls)
         self._build_acceptance(controls)
         self._build_nsga(controls)
         self._build_run_controls(controls)
         self._build_output(output)
 
+    def _build_campaign(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="Campaign", padding=8)
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        frame.columnconfigure(1, weight=1)
+        self._entry(frame, "Campaign name", self.campaign_name_var, 0)
+        ttk.Label(frame, text="Output directory").grid(row=1, column=0, sticky="w", pady=2, padx=(0, 8))
+        ttk.Entry(frame, textvariable=self.output_dir_var, width=18).grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=2,
+            padx=(0, 4),
+        )
+        ttk.Button(frame, text="Browse", command=self._browse_output_dir).grid(row=1, column=2, sticky="ew", pady=2)
+
     def _build_physics(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Magnet Physics", padding=8)
-        frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         self._entry(frame, "Target bore field [T]", self.target_field_var, 0)
         self._entry(frame, "Aperture radius [mm]", self.aperture_var, 1)
         ttk.Label(frame, text="Layers").grid(row=2, column=0, sticky="w", pady=2)
@@ -143,26 +168,32 @@ class App(tk.Tk):
 
     def _build_layers(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Per-Layer Topology", padding=8)
-        frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.layers_frame = frame
+
+    def _build_geometry(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="Geometry / Manufacturability", padding=8)
+        frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        self._entry(frame, "Midplane gap [mm]", self.min_gap_var, 0)
+        self._entry(frame, "Inter-layer radial gap [mm]", self.min_layer_clearance_var, 1)
 
     def _build_acceptance(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Acceptance Targets", padding=8)
-        frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         self._entry(frame, "Max |harmonic| [1e-4]", self.max_harmonic_var, 0)
         self._entry(frame, "Min load-line margin [%]", self.min_margin_var, 1)
         self._entry(frame, "Max current [A]", self.max_current_var, 2)
 
     def _build_nsga(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="NSGA-II Parameters", padding=8)
-        frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         self._entry(frame, "Population size", self.pop_size_var, 0)
         self._entry(frame, "Generations", self.n_gen_var, 1)
         self._entry(frame, "Seed", self.seed_var, 2)
 
     def _build_run_controls(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Run Controls", padding=8)
-        frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        frame.grid(row=6, column=0, sticky="ew", pady=(0, 8))
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.run_button = ttk.Button(buttons, text="Run Campaign", command=self._run_campaign)
@@ -261,6 +292,15 @@ class App(tk.Tk):
         )
         if path:
             self.layer_vars[index]["cadata_path"].set(path)
+
+    def _browse_output_dir(self) -> None:
+        initial_dir = self.output_dir_var.get().strip()
+        options: dict[str, str] = {"title": "Select output directory"}
+        if initial_dir:
+            options["initialdir"] = initial_dir
+        path = filedialog.askdirectory(**options)
+        if path:
+            self.output_dir_var.set(path)
 
     def _clamped_layer_count(self) -> int:
         return max(1, min(4, int(self.n_layers_var.get())))
@@ -443,6 +483,8 @@ class App(tk.Tk):
     def _state(self) -> dict[str, Any]:
         n_layers = self._clamped_layer_count()
         return {
+            "campaign_name": self.campaign_name_var.get(),
+            "output_dir": self.output_dir_var.get(),
             "target_bore_field_t": float(self.target_field_var.get()),
             "aperture_radius_mm": float(self.aperture_var.get()),
             "n_layers": n_layers,
@@ -459,6 +501,8 @@ class App(tk.Tk):
             },
             "feasibility": {
                 **self.feasibility_settings,
+                "min_gap_mm": float(self.min_gap_var.get()),
+                "min_layer_clearance_mm": float(self.min_layer_clearance_var.get()),
                 "max_angle_deg": tuple(
                     float(variables["max_angle_deg"].get())
                     for variables in self.layer_vars[:n_layers]
@@ -478,10 +522,14 @@ class App(tk.Tk):
             **DEFAULT_STATE["feasibility"],
             **state.get("feasibility", {}),
         }
+        self.campaign_name_var.set(str(state.get("campaign_name", DEFAULT_STATE["campaign_name"])))
+        self.output_dir_var.set(str(state.get("output_dir", DEFAULT_STATE["output_dir"])))
         self.target_field_var.set(str(state["target_bore_field_t"]))
         self.aperture_var.set(str(state["aperture_radius_mm"]))
         self.n_layers_var.set(int(state["n_layers"]))
         self.temperature_var.set(str(state["temperature_k"]))
+        self.min_gap_var.set(str(self.feasibility_settings["min_gap_mm"]))
+        self.min_layer_clearance_var.set(str(self.feasibility_settings["min_layer_clearance_mm"]))
         self.max_harmonic_var.set(str(state["acceptance"]["max_harmonic_units"]))
         self.min_margin_var.set(str(state["acceptance"]["min_margin_percent"]))
         self.max_current_var.set(
@@ -503,13 +551,19 @@ class App(tk.Tk):
         self._sync_layer_rows()
 
     def _save_config(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Save DOT GUI config",
-            defaultextension=".json",
-            filetypes=(("JSON", "*.json"), ("All files", "*.*")),
-        )
+        state = self._state()
+        options: dict[str, Any] = {
+            "title": "Save DOT GUI config",
+            "defaultextension": ".json",
+            "filetypes": (("JSON", "*.json"), ("All files", "*.*")),
+            "initialfile": f"{_config_basename(state['campaign_name'])}.json",
+        }
+        output_dir = str(state["output_dir"]).strip()
+        if output_dir:
+            options["initialdir"] = output_dir
+        path = filedialog.asksaveasfilename(**options)
         if path:
-            save_config(self._state(), path)
+            save_config(state, path)
             self._append_log(f"Saved config: {path}")
 
     def _load_config(self) -> None:
@@ -532,6 +586,11 @@ def _coerce_var_value(key: str, value: str) -> str | int | float:
     if key in {"n_blocks", "turn_min", "turn_max"}:
         return int(value)
     return float(value)
+
+
+def _config_basename(campaign_name: Any) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(campaign_name).strip()).strip(".-")
+    return safe or DEFAULT_CAMPAIGN_NAME
 
 
 def _default_max_angle_deg(layer_index: int) -> float:
