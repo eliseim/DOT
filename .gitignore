@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-*/
 venv/
 .env
 .pytest_cache/
@@ -18,3 +19,6 @@ htmlcov/
 
 # orchestration worktrees live outside version control
 .worktrees/
+
+# coordinator scratch/exploratory scripts, never part of the package
+.tmp_scratch/
