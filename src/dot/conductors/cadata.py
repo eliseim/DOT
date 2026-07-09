@@ -74,7 +74,12 @@ class UnsupportedFitTypeError(ValueError):
         self.name = name
 
 
-def parse_cadata_text(text: str) -> CadataRecords:
+def parse_cadata_text(
+    text: str,
+    *,
+    remfit_name: str | None = None,
+    first_supported_remfit: bool = False,
+) -> CadataRecords:
     """Parse STRAND, CABLE, and REMFIT records from ``.cadata`` text.
 
     The ROXIE catalogue format is section-count based. Relevant rows use these
@@ -84,8 +89,14 @@ def parse_cadata_text(text: str) -> CadataRecords:
     * ``CABLE``: ``No Name height width_i width_o ns transp. degrd ...``
     * ``REMFIT``: ``No Name Type C1 C2 C3 C4 C5 C6 C7 C8 ...``
 
-    Other sections and trailing human-readable header rows are ignored.
+    Other sections and trailing human-readable header rows are ignored. By
+    default, all REMFIT rows are parsed eagerly and any unsupported type raises.
+    Pass ``remfit_name`` or ``first_supported_remfit`` to parse only the REMFIT
+    row the caller needs.
     """
+
+    if remfit_name is not None and first_supported_remfit:
+        raise ValueError("remfit_name and first_supported_remfit are mutually exclusive")
 
     sections = _section_rows(text.splitlines())
     strands: dict[str, StrandRecord] = {}
@@ -108,16 +119,61 @@ def parse_cadata_text(text: str) -> CadataRecords:
             degradation_percent=float(row[7]),
         )
 
-    for row in sections.get("REMFIT", ()):
-        if len(row) < 10:
-            raise ValueError(f"REMFIT row has too few columns: {row!r}")
-        name = row[1]
-        fit_type = int(float(row[2]))
-        if fit_type != 1:
-            raise UnsupportedFitTypeError(fit_type, name)
-        remfits[name] = Type1FitCoefficients(*(float(value) for value in row[3:10]))
+    remfits = _parse_remfits(
+        sections.get("REMFIT", ()),
+        remfit_name=remfit_name,
+        first_supported_remfit=first_supported_remfit,
+    )
 
     return CadataRecords(strands=strands, cables=cables, remfits=remfits)
+
+
+def find_type1_remfit(text: str, name: str) -> Type1FitCoefficients:
+    """Return the named type-1 REMFIT coefficients without validating others."""
+
+    records = parse_cadata_text(text, remfit_name=name)
+    return records.remfits[name]
+
+
+def _parse_remfits(
+    rows: list[list[str]],
+    *,
+    remfit_name: str | None,
+    first_supported_remfit: bool,
+) -> dict[str, Type1FitCoefficients]:
+    if remfit_name is not None:
+        for row in rows:
+            if len(row) < 2:
+                continue
+            name = row[1]
+            if name != remfit_name:
+                continue
+            return {name: _parse_type1_remfit_row(row)}
+        raise ValueError(f"REMFIT record {remfit_name!r} not found")
+
+    remfits: dict[str, Type1FitCoefficients] = {}
+    for row in rows:
+        if first_supported_remfit:
+            if len(row) < 3:
+                continue
+            fit_type = int(float(row[2]))
+            if fit_type != 1:
+                continue
+        fit = _parse_type1_remfit_row(row)
+        remfits[row[1]] = fit
+        if first_supported_remfit:
+            break
+    return remfits
+
+
+def _parse_type1_remfit_row(row: list[str]) -> Type1FitCoefficients:
+    if len(row) < 10:
+        raise ValueError(f"REMFIT row has too few columns: {row!r}")
+    name = row[1]
+    fit_type = int(float(row[2]))
+    if fit_type != 1:
+        raise UnsupportedFitTypeError(fit_type, name)
+    return Type1FitCoefficients(*(float(value) for value in row[3:10]))
 
 
 def _section_rows(lines: list[str]) -> dict[str, list[list[str]]]:

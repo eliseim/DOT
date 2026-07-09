@@ -351,7 +351,7 @@ class App(tk.Tk):
             if path is None or not path.is_file():
                 raise ValueError(f"Please select a .cadata file for Layer {index + 1}")
             text = path.read_text(encoding="utf-8")
-            records = parse_cadata_text(text)
+            records = parse_cadata_text(text, first_supported_remfit=True)
             cable_id = f"layer-{index + 1}"
             cables[cable_id] = _cable_spec_from_cadata_text(text)
             conductor_data.append(_first_conductor_data(records))

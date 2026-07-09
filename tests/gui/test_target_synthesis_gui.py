@@ -77,6 +77,31 @@ def test_campaign_inputs_requires_existing_cadata_file(cadata_path: str) -> None
         target_synthesis_gui.App._campaign_inputs(app)
 
 
+def test_campaign_inputs_uses_first_supported_remfit(tmp_path) -> None:  # noqa: ANN001
+    cadata_path = tmp_path / "mixed.cadata"
+    cadata_path.write_text(
+        """
+REMFIT 2
+  1 NB3SNA 5         3.5E+10           28           18            0            0            0            0            0            0            0            0 'PIT strand fit poor'
+ 11 FIT1   1           3E+09          9.2         0.57          0.9         2.32        27.04         14.5            0            0            0            0 'LHC NBTI'
+STRAND 1
+  3 STR01            1.065          1.6    70          1.9           10       1433.3       500.34 'MB INNER'
+CABLE 1
+ 12 CABLE01           15.1        1.736        2.064    28          115            5 'MB INNER LAYER'
+""",
+        encoding="utf-8",
+    )
+    app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
+    state["layers"][0]["cadata_path"] = str(cadata_path)
+    app._state = lambda: state
+
+    topology, targets, _ = target_synthesis_gui.App._campaign_inputs(app)
+
+    assert topology.cables["layer-1"].width_mm == pytest.approx(1.9)
+    assert targets.cadata_by_layer[0].remfit.c1 == 3.0e9
+
+
 def _app_shell():
     app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
     app.target_field_var = FakeVar("0.02")

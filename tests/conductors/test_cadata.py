@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from dot.conductors import (
@@ -7,6 +9,7 @@ from dot.conductors import (
     UnsupportedFitTypeError,
     parse_cadata_text,
 )
+from dot.conductors.cadata import find_type1_remfit
 
 
 def test_parse_cadata_text_extracts_strand_cable_and_type1_remfit() -> None:
@@ -51,3 +54,57 @@ REMFIT 1
 
     assert exc_info.value.fit_type == 11
     assert exc_info.value.name == "PIT192"
+
+
+def test_named_type1_remfit_ignores_unrelated_unsupported_records() -> None:
+    text = """
+REMFIT 3
+  1 NB3SNA 5         3.5E+10           28           18            0            0            0            0            0            0            0            0 'PIT strand fit poor'
+ 11 FIT1   1           3E+09          9.2         0.57          0.9         2.32        27.04         14.5            0            0            0            0 'LHC NBTI'
+ 12 PIT192 11     1.7834E+11           30           16         0.96         1.52          0.5            2            0            0            0            0 'PIT 192 REF'
+"""
+
+    records = parse_cadata_text(text, remfit_name="FIT1")
+
+    assert records.remfits == {
+        "FIT1": Type1FitCoefficients(
+            c1=3.0e9,
+            c2=9.2,
+            c3=0.57,
+            c4=0.9,
+            c5=2.32,
+            c6=27.04,
+            c7=14.5,
+        )
+    }
+
+
+def test_named_unsupported_remfit_still_raises() -> None:
+    text = """
+REMFIT 2
+  1 NB3SNA 5         3.5E+10           28           18            0            0            0            0            0            0            0            0 'PIT strand fit poor'
+ 11 FIT1   1           3E+09          9.2         0.57          0.9         2.32        27.04         14.5            0            0            0            0 'LHC NBTI'
+"""
+
+    with pytest.raises(UnsupportedFitTypeError) as exc_info:
+        parse_cadata_text(text, remfit_name="NB3SNA")
+
+    assert exc_info.value.fit_type == 5
+    assert exc_info.value.name == "NB3SNA"
+
+
+def test_real_roxie_cth_file_resolves_type1_fit_by_name() -> None:
+    path = Path(r"C:\Users\elisei\Desktop\dipole_designer\roxie_CTH_cables.cadata")
+    text = path.read_text(encoding="utf-8")
+
+    remfit = find_type1_remfit(text, "FIT1")
+
+    assert remfit == Type1FitCoefficients(
+        c1=3.0e9,
+        c2=9.2,
+        c3=0.57,
+        c4=0.9,
+        c5=2.32,
+        c6=27.04,
+        c7=14.5,
+    )
