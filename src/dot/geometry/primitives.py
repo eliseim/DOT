@@ -83,11 +83,12 @@ class Block:
 
     def turns(self) -> tuple[TurnPolygon, ...]:
         _require_positive_int(self.n_turns, "n_turns")
-        radial_pitch = self.cable.insulated_height_mm
+        _require_finite_positive(self.inner_radius_mm, "inner_radius_mm")
+        delta_phi_deg = math.degrees(self.cable.insulated_width_mm / self.inner_radius_mm)
         return tuple(
             TurnPolygon.from_parameters(
-                inner_radius_mm=self.inner_radius_mm + index * radial_pitch,
-                phi_deg=self.phi_deg,
+                inner_radius_mm=self.inner_radius_mm,
+                phi_deg=self.phi_deg + index * delta_phi_deg,
                 alpha_deg=self.alpha_deg,
                 cable=self.cable,
                 current_a=self.current_a,
