@@ -1,0 +1,1 @@
+DOT (Dipole Optimization Tool) is a tool for designing the 2D no-iron cross-section of a superconducting dipole magnet without depending on ROXIE. Current status: early scaffolding, no physics engine yet. See [docs/ai/README.md](docs/ai/README.md) for the AI-assisted development workflow.
