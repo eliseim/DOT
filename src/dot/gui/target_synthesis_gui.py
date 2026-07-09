@@ -27,6 +27,9 @@ from .cross_section_plot import cross_section_figure
 DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG = 80.0
 DEFAULT_OUTER_LAYER_MAX_ANGLE_DEG = 85.0
 DEFAULT_MAX_CURRENT_A = 13000.0
+# Wide enough to cover CTH-like block tilts while avoiding extreme cable rotations.
+DEFAULT_ALPHA_MIN_DEG = -10.0
+DEFAULT_ALPHA_MAX_DEG = 70.0
 
 DEFAULT_STATE: dict[str, Any] = {
     "target_bore_field_t": 0.02,
@@ -59,6 +62,8 @@ DEFAULT_STATE: dict[str, Any] = {
             "inner_radius_max_mm": 22.0,
             "phi_min_deg": 10.0,
             "phi_max_deg": 70.0,
+            "alpha_min_deg": DEFAULT_ALPHA_MIN_DEG,
+            "alpha_max_deg": DEFAULT_ALPHA_MAX_DEG,
             "max_angle_deg": DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG,
         }
     ],
@@ -215,6 +220,8 @@ class App(tk.Tk):
             "inner_radius_max_mm": tk.StringVar(value=f"{radius_min + 2.0:.3g}"),
             "phi_min_deg": tk.StringVar(value=str(state["phi_min_deg"])),
             "phi_max_deg": tk.StringVar(value=str(state["phi_max_deg"])),
+            "alpha_min_deg": tk.StringVar(value=str(state["alpha_min_deg"])),
+            "alpha_max_deg": tk.StringVar(value=str(state["alpha_max_deg"])),
             "max_angle_deg": tk.StringVar(value=str(_default_max_angle_deg(index))),
         }
 
@@ -239,6 +246,8 @@ class App(tk.Tk):
             ("R max", "inner_radius_max_mm"),
             ("Phi min", "phi_min_deg"),
             ("Phi max", "phi_max_deg"),
+            ("Alpha min [deg]", "alpha_min_deg"),
+            ("Alpha max [deg]", "alpha_max_deg"),
             ("Max pole angle [deg]", "max_angle_deg"),
         ]
         for column, (label, key) in enumerate(labels):
@@ -404,6 +413,7 @@ class App(tk.Tk):
                     ),
                     phi_bounds_deg=(float(layer["phi_min_deg"]), float(layer["phi_max_deg"])),
                     n_turns_bounds=(int(layer["turn_min"]), int(layer["turn_max"])),
+                    alpha_bounds_deg=(float(layer["alpha_min_deg"]), float(layer["alpha_max_deg"])),
                 )
             )
 

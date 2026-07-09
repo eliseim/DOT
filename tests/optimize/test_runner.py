@@ -28,6 +28,10 @@ def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -
     )
 
     assert result.candidates
+    for candidate in result.candidates:
+        layer = candidate.design.layers[0]
+        assert layer.blocks[0].alpha_deg == 0.0
+        assert all(-10.0 <= block.alpha_deg <= 20.0 for block in layer.blocks[1:])
     candidate = result.candidates[0]
     field_quality = field_quality_objective(
         candidate.design,
@@ -86,6 +90,7 @@ def _topology() -> Topology:
                 inner_radius_bounds_mm=(20.0, 22.0),
                 phi_bounds_deg=(10.0, 70.0),
                 n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(-10.0, 20.0),
             ),
         ),
         cables={"inner": cable},
@@ -101,6 +106,7 @@ def _four_layer_topology() -> Topology:
             inner_radius_bounds_mm=(20.0 + index * 4.0, 20.5 + index * 4.0),
             phi_bounds_deg=(10.0 + index * 15.0, 15.0 + index * 15.0),
             n_turns_bounds=(1, 1),
+            alpha_bounds_deg=(-10.0, 70.0),
         )
         for index in range(4)
     )

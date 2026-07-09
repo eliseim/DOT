@@ -10,7 +10,7 @@ from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings,
 
 def test_problem_marks_overlapping_turns_as_constraint_violation() -> None:
     problem = DipoleOptimizationProblem(_topology(), _targets(), _feasibility())
-    infeasible_genome = np.asarray([12.0, 20.0, 1.0, 20.0, 1.0])
+    infeasible_genome = np.asarray([12.0, 20.0, 1.0, 20.0, 1.0, 0.0])
 
     f_values, g_values = problem.evaluate(infeasible_genome, return_values_of=["F", "G"])
 
@@ -20,7 +20,7 @@ def test_problem_marks_overlapping_turns_as_constraint_violation() -> None:
 
 def test_problem_accepts_feasible_genome() -> None:
     problem = DipoleOptimizationProblem(_topology(), _targets(), _feasibility())
-    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0])
+    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 0.0])
 
     f_values, g_values = problem.evaluate(feasible_genome, return_values_of=["F", "G"])
 
@@ -35,8 +35,8 @@ def test_problem_marks_operating_current_above_cap_as_constraint_violation() -> 
         _targets(max_current_a=200.0),
         _feasibility(),
     )
-    over_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0])
-    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0])
+    over_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 0.0])
+    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0, 0.0])
 
     over_f, over_g = problem.evaluate(over_cap_genome, return_values_of=["F", "G"])
     under_f, under_g = problem.evaluate(under_cap_genome, return_values_of=["F", "G"])
@@ -58,6 +58,7 @@ def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> No
                 inner_radius_bounds_mm=(20.0, 20.5),
                 phi_bounds_deg=(10.0, 20.0),
                 n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(-10.0, 70.0),
             ),
             LayerTopology(
                 cable_id="supported",
@@ -65,6 +66,7 @@ def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> No
                 inner_radius_bounds_mm=(24.0, 24.5),
                 phi_bounds_deg=(40.0, 50.0),
                 n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(-10.0, 70.0),
             ),
         ),
         cables={"unsupported": cable, "supported": cable},
@@ -97,6 +99,7 @@ def _topology() -> Topology:
                 inner_radius_bounds_mm=(12.0, 14.0),
                 phi_bounds_deg=(10.0, 50.0),
                 n_turns_bounds=(1, 2),
+                alpha_bounds_deg=(-10.0, 70.0),
             ),
         ),
         cables={"inner": cable},
