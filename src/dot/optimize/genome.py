@@ -140,11 +140,15 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
     lower: list[float] = []
     upper: list[float] = []
     for layer in topology.layers:
+        phi_lower, phi_upper = layer.phi_bounds_deg
+        window_width = (phi_upper - phi_lower) / layer.n_blocks
         lower.append(layer.inner_radius_bounds_mm[0])
         upper.append(layer.inner_radius_bounds_mm[1])
         for block_index in range(layer.n_blocks):
-            lower.extend((layer.phi_bounds_deg[0], float(layer.n_turns_bounds[0])))
-            upper.extend((layer.phi_bounds_deg[1], float(layer.n_turns_bounds[1])))
+            block_phi_lower = phi_lower + block_index * window_width
+            block_phi_upper = phi_lower + (block_index + 1) * window_width
+            lower.extend((block_phi_lower, float(layer.n_turns_bounds[0])))
+            upper.extend((block_phi_upper, float(layer.n_turns_bounds[1])))
             if block_index > 0:
                 lower.append(layer.alpha_bounds_deg[0])
                 upper.append(layer.alpha_bounds_deg[1])

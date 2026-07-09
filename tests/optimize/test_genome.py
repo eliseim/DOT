@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
+from dot.geometry.constraints import check_feasibility
 from dot.optimize import LayerTopology, Topology, decode, encode, genome_bounds
 
 
@@ -178,40 +180,142 @@ def test_genome_bounds_match_topology_order() -> None:
 
     assert lower.shape == (topology.n_var,)
     assert upper.shape == (topology.n_var,)
-    assert lower.tolist() == [
-        10.0,
-        5.0,
-        1.0,
-        5.0,
-        1.0,
-        -10.0,
-        22.0,
-        15.0,
-        1.0,
-        15.0,
-        1.0,
-        -5.0,
-        15.0,
-        1.0,
-        -5.0,
-    ]
-    assert upper.tolist() == [
-        20.0,
-        60.0,
-        5.0,
-        60.0,
-        5.0,
-        70.0,
-        30.0,
-        80.0,
-        6.0,
-        80.0,
-        6.0,
-        68.0,
-        80.0,
-        6.0,
-        68.0,
-    ]
+    assert lower.tolist() == pytest.approx(
+        [
+            10.0,
+            5.0,
+            1.0,
+            32.5,
+            1.0,
+            -10.0,
+            22.0,
+            15.0,
+            1.0,
+            36.66666666666667,
+            1.0,
+            -5.0,
+            58.333333333333336,
+            1.0,
+            -5.0,
+        ]
+    )
+    assert upper.tolist() == pytest.approx(
+        [
+            20.0,
+            32.5,
+            5.0,
+            60.0,
+            5.0,
+            70.0,
+            30.0,
+            36.66666666666667,
+            6.0,
+            58.333333333333336,
+            6.0,
+            68.0,
+            80.0,
+            6.0,
+            68.0,
+        ]
+    )
+
+
+def test_genome_bounds_partitions_four_block_phi_window() -> None:
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(10.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-10.0, 70.0),
+            ),
+        ),
+    )
+
+    lower, upper = genome_bounds(topology)
+
+    phi_slots = [1, 3, 6, 9]
+    assert lower[phi_slots].tolist() == pytest.approx([2.0, 21.0, 40.0, 59.0])
+    assert upper[phi_slots].tolist() == pytest.approx([21.0, 40.0, 59.0, 78.0])
+
+
+def test_genome_bounds_leaves_single_block_phi_bounds_unchanged() -> None:
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=1,
+                inner_radius_bounds_mm=(10.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-10.0, 70.0),
+            ),
+        ),
+    )
+
+    lower, upper = genome_bounds(topology)
+
+    assert lower.tolist() == [10.0, 2.0, 1.0]
+    assert upper.tolist() == [20.0, 78.0, 5.0]
+
+
+def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+    old_lower = np.array(
+        [20.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0]
+    )
+    old_upper = np.array(
+        [20.0, 78.0, 1.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0]
+    )
+    new_lower, new_upper = genome_bounds(topology)
+
+    old_feasible = _sample_feasible_count(topology, old_lower, old_upper)
+    new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
+
+    assert old_feasible == 21
+    assert new_feasible == 100
+    assert new_feasible >= old_feasible + 50
+
+
+def _sample_feasible_count(
+    topology: Topology,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    *,
+    n_samples: int = 200,
+    seed: int = 13,
+) -> int:
+    rng = np.random.default_rng(seed)
+    feasible_count = 0
+    for _ in range(n_samples):
+        genome = rng.uniform(lower, upper)
+        design = decode(genome, topology, topology.cables)
+        result = check_feasibility(
+            design,
+            aperture_radius_mm=topology.aperture_radius_mm,
+            min_gap_mm=0.1,
+            max_angle_deg=90.0,
+        )
+        feasible_count += int(result.is_feasible)
+    return feasible_count
 
 
 def test_layer_topology_validates_alpha_bounds_order() -> None:
