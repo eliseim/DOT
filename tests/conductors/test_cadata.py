@@ -10,6 +10,7 @@ from dot.conductors import (
     parse_cadata_text,
 )
 from dot.conductors.cadata import find_type1_remfit
+from dot.conductors.cadata import resolve_conductor
 
 
 def test_parse_cadata_text_extracts_strand_cable_and_type1_remfit() -> None:
@@ -108,3 +109,54 @@ def test_real_roxie_cth_file_resolves_type1_fit_by_name() -> None:
         c6=27.04,
         c7=14.5,
     )
+
+
+def test_real_roxie_cth_file_resolves_named_conductor_links() -> None:
+    path = Path(r"C:\Users\elisei\Desktop\dipole_designer\roxie_CTH_cables.cadata")
+    text = path.read_text(encoding="utf-8")
+
+    lf = resolve_conductor(text, "CTH_LF")
+    hf = resolve_conductor(text, "CTH_HF")
+
+    assert lf.status == "resolved"
+    assert lf.conductor is not None
+    assert lf.conductor.cable_name == "CTH_CERN"
+    assert lf.conductor.strand_name == "STR01_12"
+    assert lf.conductor.remfit_name == "NBTILHC"
+    assert lf.remfit_name == "FIT1"
+    assert lf.temperature_k == pytest.approx(1.9)
+    assert lf.strand is not None
+    assert lf.strand.diameter_mm == pytest.approx(1.065)
+    assert lf.strand.cu_to_sc_ratio == pytest.approx(1.2)
+    assert lf.cable is not None
+    assert lf.cable.n_strands == 30
+    assert lf.cable.degradation_percent == pytest.approx(5.0)
+    assert lf.remfit == Type1FitCoefficients(
+        c1=3.0e9,
+        c2=9.2,
+        c3=0.57,
+        c4=0.9,
+        c5=2.32,
+        c6=27.04,
+        c7=14.5,
+    )
+
+    assert hf.status == "unsupported_fit_type"
+    assert hf.conductor is not None
+    assert hf.conductor.cable_name == "CXF150HT5"
+    assert hf.conductor.remfit_name == "NB3SNMP"
+    assert hf.remfit_name == "HFM1"
+    assert hf.unsupported_fit_type == 11
+    assert "unsupported REMFIT type 11" in hf.message
+
+
+def test_resolve_conductor_reports_name_not_found() -> None:
+    text = """
+CONDUCTOR 1
+ 1 A 1 C S F I T R 1.9 'comment'
+"""
+
+    resolution = resolve_conductor(text, "MISSING")
+
+    assert resolution.status == "not_found"
+    assert "MISSING" in resolution.message

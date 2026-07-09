@@ -102,6 +102,49 @@ CABLE 1
     assert targets.cadata_by_layer[0].remfit.c1 == 3.0e9
 
 
+def test_campaign_inputs_resolves_named_conductors_and_excludes_unsupported(tmp_path) -> None:  # noqa: ANN001
+    cadata_path = tmp_path / "named.cadata"
+    cadata_path.write_text(
+        """
+REMFIT 2
+  1 BADFIT 3           1           1            1            1            1            1            1            0            0            0            0 'unsupported'
+  2 FIT1   1        3E+09         9.2         0.57          0.9         2.32        27.04         14.5          0            0            0            0 'LHC NBTI'
+STRAND 2
+  1 BADSTR           0.85          0.9   150          4.4        13.54         2087          161 'HF'
+  2 GOODSTR         1.065          1.2    70          1.9           10       1433.3       500.34 'LF'
+CABLE 2
+  1 BADCABLE          18.0          1.0          3.0    40          109            5 'HF cable'
+  2 GOODCABLE         16.0          4.0          6.0    30          123            5 'LF cable'
+CONDUCTOR 2
+  1 HF 1 BADCABLE  BADSTR  FILHF INS OSTA BADFIT 1.9 'unsupported conductor'
+  2 LF 1 GOODCABLE GOODSTR FILLF INS TRANS FIT1   1.9 'supported conductor'
+""",
+        encoding="utf-8",
+    )
+    app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
+    state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
+    state["n_layers"] = 2
+    state["layers"] = [copy.deepcopy(state["layers"][0]), copy.deepcopy(state["layers"][0])]
+    state["layers"][0]["cadata_path"] = str(cadata_path)
+    state["layers"][0]["conductor_name"] = "HF"
+    state["layers"][1]["cadata_path"] = str(cadata_path)
+    state["layers"][1]["conductor_name"] = "LF"
+    state["layers"][1]["inner_radius_min_mm"] = 24.0
+    state["layers"][1]["inner_radius_max_mm"] = 26.0
+    app._state = lambda: state
+
+    topology, targets, _ = target_synthesis_gui.App._campaign_inputs(app)
+
+    assert topology.cables["layer-1"].width_mm == pytest.approx(2.0)
+    assert topology.cables["layer-2"].width_mm == pytest.approx(5.0)
+    assert targets.cadata_by_layer[0] is None
+    assert targets.cadata_by_layer[1] is not None
+    assert targets.cadata_by_layer[1].strand.diameter_mm == pytest.approx(1.065)
+    assert [(item.layer_index, item.reason) for item in targets.excluded_margin_layers] == [
+        (0, "unsupported REMFIT type 3 for 'BADFIT'; only type 1 is supported")
+    ]
+
+
 def _app_shell():
     app = target_synthesis_gui.App.__new__(target_synthesis_gui.App)
     app.target_field_var = FakeVar("0.02")

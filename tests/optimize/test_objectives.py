@@ -8,6 +8,7 @@ from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
 from dot.conductors import load_line_margin_percent, solve_short_sample_current
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.optimize import LayerConductorData, field_quality_objective, load_line_margin_objective
+from dot.optimize.objectives import _peak_field_on_own_turns
 from dot.physics import field_at, multipole_coefficients, place_line_current_sources
 
 
@@ -49,6 +50,36 @@ def test_load_line_margin_objective_matches_direct_loadline_solver_inputs() -> N
     assert actual == pytest.approx(expected, rel=1.0e-12, abs=1.0e-12)
 
 
+def test_load_line_margin_skips_unsupported_layers_before_peak_search() -> None:
+    design = _two_layer_design(current_a=250.0)
+
+    overall_turn, _ = _peak_field_on_own_turns(design)
+    evaluated_turn, _ = _peak_field_on_own_turns(design, evaluated_layers=(1,))
+    margin = load_line_margin_objective(
+        design,
+        cable_specs_by_layer=(
+            design.layers[0].blocks[0].cable,
+            design.layers[1].blocks[0].cable,
+        ),
+        cadata_by_layer=(None, conductor_data()),
+        temperature_k=0.0,
+    )
+
+    assert overall_turn.layer_index == 0
+    assert evaluated_turn.layer_index == 1
+    assert margin > 0.0
+
+
+def test_load_line_margin_requires_at_least_one_supported_layer() -> None:
+    with pytest.raises(ValueError, match="requires conductor data"):
+        load_line_margin_objective(
+            _two_layer_design(current_a=250.0),
+            cable_specs_by_layer=(),
+            cadata_by_layer=(None, None),
+            temperature_k=0.0,
+        )
+
+
 def _asymmetric_design(*, current_a: float) -> DipoleDesign:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return DipoleDesign(
@@ -71,6 +102,41 @@ def _asymmetric_design(*, current_a: float) -> DipoleDesign:
                         n_turns=2,
                         cable=cable,
                         inner_radius_mm=12.0,
+                        current_a=current_a,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _two_layer_design(*, current_a: float) -> DipoleDesign:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
+    return DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(
+            Layer(
+                inner_radius_mm=10.0,
+                blocks=(
+                    Block(
+                        phi_deg=15.0,
+                        alpha_deg=0.0,
+                        n_turns=1,
+                        cable=cable,
+                        inner_radius_mm=10.0,
+                        current_a=current_a,
+                    ),
+                ),
+            ),
+            Layer(
+                inner_radius_mm=32.0,
+                blocks=(
+                    Block(
+                        phi_deg=55.0,
+                        alpha_deg=0.0,
+                        n_turns=1,
+                        cable=cable,
+                        inner_radius_mm=32.0,
                         current_a=current_a,
                     ),
                 ),

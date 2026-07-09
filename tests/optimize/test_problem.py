@@ -29,6 +29,45 @@ def test_problem_accepts_feasible_genome() -> None:
     assert f_values[1] < 0.0
 
 
+def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> None:
+    cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="unsupported",
+                n_blocks=1,
+                inner_radius_bounds_mm=(20.0, 20.5),
+                phi_bounds_deg=(10.0, 20.0),
+                n_turns_bounds=(1, 1),
+            ),
+            LayerTopology(
+                cable_id="supported",
+                n_blocks=1,
+                inner_radius_bounds_mm=(24.0, 24.5),
+                phi_bounds_deg=(40.0, 50.0),
+                n_turns_bounds=(1, 1),
+            ),
+        ),
+        cables={"unsupported": cable, "supported": cable},
+    )
+    targets = OptimizationTargets(
+        target_bore_field_t=0.02,
+        r_ref_mm=5.0,
+        max_order=4,
+        cadata_by_layer=(None, conductor_data()),
+        temperature_k=0.0,
+    )
+    problem = DipoleOptimizationProblem(topology, targets, _feasibility())
+    feasible_genome = np.asarray([20.0, 12.0, 1.0, 24.0, 45.0, 1.0])
+
+    f_values, g_values = problem.evaluate(feasible_genome, return_values_of=["F", "G"])
+
+    assert g_values[0] <= 0.0
+    assert f_values[0] < 1.0e12
+    assert f_values[1] < 0.0
+
+
 def _topology() -> Topology:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return Topology(

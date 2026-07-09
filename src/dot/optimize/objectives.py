@@ -44,7 +44,7 @@ def field_quality_objective(design: DipoleDesign, r_ref_mm: float, max_order: in
 def load_line_margin_objective(
     design: DipoleDesign,
     cable_specs_by_layer: object,
-    cadata_by_layer: tuple[LayerConductorData, ...],
+    cadata_by_layer: tuple[LayerConductorData | None, ...],
     temperature_k: float,
 ) -> float:
     """Return load-line current margin percent for the peak-field turn proxy.
@@ -55,13 +55,18 @@ def load_line_margin_objective(
     """
 
     del cable_specs_by_layer
-    limiting_turn, peak_field_t = _peak_field_on_own_turns(design)
+    evaluated_layers = tuple(index for index, layer_data in enumerate(cadata_by_layer) if layer_data is not None)
+    if not evaluated_layers:
+        raise ValueError("load-line margin requires conductor data for at least one layer")
+    limiting_turn, peak_field_t = _peak_field_on_own_turns(design, evaluated_layers=evaluated_layers)
     operating_current_a = abs(limiting_turn.turn.current_a)
     if operating_current_a == 0.0:
         raise ValueError("operating current must be nonzero")
     if limiting_turn.layer_index >= len(cadata_by_layer):
         raise ValueError("missing conductor data for limiting layer")
     layer_data = cadata_by_layer[limiting_turn.layer_index]
+    if layer_data is None:
+        raise ValueError("missing conductor data for limiting layer")
     short_sample_current_a = solve_short_sample_current(
         layer_data.remfit,
         layer_data.strand,
@@ -76,11 +81,18 @@ def _design_sources(design: DipoleDesign):
     return tuple(source for turn in design.all_turns() for source in place_line_current_sources(turn))
 
 
-def _peak_field_on_own_turns(design: DipoleDesign) -> tuple[_IndexedTurn, float]:
+def _peak_field_on_own_turns(
+    design: DipoleDesign,
+    *,
+    evaluated_layers: tuple[int, ...] | None = None,
+) -> tuple[_IndexedTurn, float]:
     sources = _design_sources(design)
+    evaluated_layer_set = set(evaluated_layers) if evaluated_layers is not None else None
     best_turn: _IndexedTurn | None = None
     best_field = -math.inf
     for layer_index, layer in enumerate(design.layers):
+        if evaluated_layer_set is not None and layer_index not in evaluated_layer_set:
+            continue
         for block in layer.blocks:
             for turn in block.turns():
                 indexed = _IndexedTurn(layer_index=layer_index, turn=turn)

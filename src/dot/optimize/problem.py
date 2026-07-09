@@ -19,16 +19,25 @@ _PENALTY = 1.0e12
 
 
 @dataclass(frozen=True, slots=True)
+class MarginEvaluationExclusion:
+    """A layer whose load-line margin was intentionally not evaluated."""
+
+    layer_index: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class OptimizationTargets:
     """Physics targets and conductor inputs for one campaign."""
 
     target_bore_field_t: float
     r_ref_mm: float
     max_order: int
-    cadata_by_layer: tuple[LayerConductorData, ...]
+    cadata_by_layer: tuple[LayerConductorData | None, ...]
     temperature_k: float
     max_harmonic_units: float | None = None
     min_margin_percent: float | None = None
+    excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

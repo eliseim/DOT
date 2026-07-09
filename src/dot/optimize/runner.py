@@ -12,7 +12,12 @@ from dot.geometry import DipoleDesign
 
 from .genome import Topology, decode
 from .operating_point import operating_point
-from .problem import DipoleOptimizationProblem, FeasibilitySettings, OptimizationTargets
+from .problem import (
+    DipoleOptimizationProblem,
+    FeasibilitySettings,
+    MarginEvaluationExclusion,
+    OptimizationTargets,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +34,7 @@ class ParetoResult:
     """Feasible non-dominated candidates from an optimization run."""
 
     candidates: tuple[ParetoCandidate, ...]
+    excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
 
 
 def run_campaign(
@@ -66,4 +72,18 @@ def run_campaign(
                     objectives=(float(objective[0]), float(objective[1])),
                 )
             )
-    return ParetoResult(candidates=tuple(candidates))
+    return ParetoResult(
+        candidates=tuple(candidates),
+        excluded_margin_layers=_margin_exclusions(targets),
+    )
+
+
+def _margin_exclusions(targets: OptimizationTargets) -> tuple[MarginEvaluationExclusion, ...]:
+    exclusions = {exclusion.layer_index: exclusion for exclusion in targets.excluded_margin_layers}
+    for layer_index, layer_data in enumerate(targets.cadata_by_layer):
+        if layer_data is None and layer_index not in exclusions:
+            exclusions[layer_index] = MarginEvaluationExclusion(
+                layer_index=layer_index,
+                reason="conductor data unavailable; load-line margin not evaluated",
+            )
+    return tuple(exclusions[index] for index in sorted(exclusions))

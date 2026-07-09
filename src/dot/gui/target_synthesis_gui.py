@@ -13,10 +13,11 @@ from typing import Any
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from dot.conductors import CadataRecords, parse_cadata_text
+from dot.conductors.cadata import ConductorResolution, resolve_conductor
 from dot.geometry import CableSpec
 from dot.optimize import LayerConductorData, LayerTopology, Topology
 from dot.optimize.objectives import field_quality_objective
-from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
+from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.physics import field_at, place_line_current_sources
 
 from .campaign_runner import CampaignEvent, CampaignRunner
@@ -45,6 +46,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "layers": [
         {
             "cadata_path": "",
+            "conductor_name": "",
             "n_blocks": 2,
             "turn_min": 1,
             "turn_max": 1,
@@ -197,6 +199,7 @@ class App(tk.Tk):
         state = DEFAULT_STATE["layers"][0]
         return {
             "cadata_path": tk.StringVar(value=""),
+            "conductor_name": tk.StringVar(value=str(state["conductor_name"])),
             "n_blocks": tk.StringVar(value=str(state["n_blocks"])),
             "turn_min": tk.StringVar(value=str(state["turn_min"])),
             "turn_max": tk.StringVar(value=str(state["turn_max"])),
@@ -207,6 +210,7 @@ class App(tk.Tk):
         }
 
     def _layer_row(self, index: int, variables: dict[str, tk.StringVar]) -> None:
+        variables.setdefault("conductor_name", tk.StringVar(value=""))
         frame = ttk.Frame(self.layers_frame)
         frame.grid(row=index, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(frame, text=f"Layer {index + 1}").grid(row=0, column=0, sticky="w")
@@ -214,6 +218,10 @@ class App(tk.Tk):
             row=0, column=1, columnspan=4, sticky="ew", padx=4
         )
         ttk.Button(frame, text="Browse", command=lambda i=index: self._browse_cadata(i)).grid(row=0, column=5)
+        ttk.Label(frame, text="Conductor name").grid(row=1, column=0, sticky="w", padx=(0, 4))
+        ttk.Entry(frame, textvariable=variables["conductor_name"], width=18).grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(0, 4)
+        )
         labels = [
             ("Blocks", "n_blocks"),
             ("Turns min", "turn_min"),
@@ -224,8 +232,8 @@ class App(tk.Tk):
             ("Phi max", "phi_max_deg"),
         ]
         for column, (label, key) in enumerate(labels):
-            ttk.Label(frame, text=label).grid(row=1, column=column, sticky="w", padx=(0, 4))
-            ttk.Entry(frame, textvariable=variables[key], width=8).grid(row=2, column=column, sticky="ew", padx=(0, 4))
+            ttk.Label(frame, text=label).grid(row=2, column=column, sticky="w", padx=(0, 4))
+            ttk.Entry(frame, textvariable=variables[key], width=8).grid(row=3, column=column, sticky="ew", padx=(0, 4))
 
     def _browse_cadata(self, index: int) -> None:
         path = filedialog.askopenfilename(
@@ -320,9 +328,12 @@ class App(tk.Tk):
                     f"Load-line margin: {margin_percent:.6g} %",
                     f"Operating current: {current_a:.6g} A",
                     f"Acceptance: {'meets targets' if meets_targets else 'does not meet targets'}",
+                    *_margin_exclusion_lines(result),
                 )
             )
         )
+        for line in _margin_exclusion_lines(result):
+            self._append_log(line)
         self._draw_plot(candidate.design)
 
     def _draw_plot(self, design) -> None:  # noqa: ANN001
@@ -344,17 +355,35 @@ class App(tk.Tk):
         aperture = float(state["aperture_radius_mm"])
         cables: dict[str, CableSpec] = {}
         layer_topologies: list[LayerTopology] = []
-        conductor_data: list[LayerConductorData] = []
+        conductor_data: list[LayerConductorData | None] = []
+        margin_exclusions: list[MarginEvaluationExclusion] = []
         for index, layer in enumerate(state["layers"]):
             cadata_path = str(layer["cadata_path"]).strip()
             path = Path(cadata_path) if cadata_path else None
             if path is None or not path.is_file():
                 raise ValueError(f"Please select a .cadata file for Layer {index + 1}")
             text = path.read_text(encoding="utf-8")
-            records = parse_cadata_text(text, first_supported_remfit=True)
+            conductor_name = str(layer.get("conductor_name", "")).strip()
             cable_id = f"layer-{index + 1}"
-            cables[cable_id] = _cable_spec_from_cadata_text(text)
-            conductor_data.append(_first_conductor_data(records))
+            if conductor_name:
+                resolution = resolve_conductor(text, conductor_name)
+                if resolution.status == "not_found":
+                    raise ValueError(resolution.message)
+                if resolution.status == "unsupported_fit_type":
+                    if resolution.conductor is None:
+                        raise ValueError(resolution.message)
+                    cables[cable_id] = _cable_spec_from_cadata_text(text, resolution.conductor.cable_name)
+                    conductor_data.append(None)
+                    reason = resolution.message
+                    margin_exclusions.append(MarginEvaluationExclusion(layer_index=index, reason=reason))
+                    self._append_log_if_ready(f"Margin evaluation excluded for Layer {index + 1}: {reason}")
+                else:
+                    cables[cable_id] = _cable_spec_from_cadata_text(text, _resolved_cable_name(resolution))
+                    conductor_data.append(_resolved_conductor_data(resolution))
+            else:
+                records = parse_cadata_text(text, first_supported_remfit=True)
+                cables[cable_id] = _cable_spec_from_cadata_text(text)
+                conductor_data.append(_first_conductor_data(records))
             layer_topologies.append(
                 LayerTopology(
                     cable_id=cable_id,
@@ -381,6 +410,7 @@ class App(tk.Tk):
             temperature_k=float(state["temperature_k"]),
             max_harmonic_units=float(state["acceptance"]["max_harmonic_units"]),
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
+            excluded_margin_layers=tuple(margin_exclusions),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=float(state["feasibility"]["min_gap_mm"]),
@@ -428,7 +458,8 @@ class App(tk.Tk):
         self.seed_var.set("" if state["nsga2"].get("seed") is None else str(state["nsga2"]["seed"]))
         self.layer_vars = []
         for layer in state["layers"]:
-            self.layer_vars.append({key: tk.StringVar(value=str(value)) for key, value in layer.items()})
+            merged_layer = {**DEFAULT_STATE["layers"][0], **layer}
+            self.layer_vars.append({key: tk.StringVar(value=str(value)) for key, value in merged_layer.items()})
         self._sync_layer_rows()
 
     def _save_config(self) -> None:
@@ -450,9 +481,13 @@ class App(tk.Tk):
             self._apply_state(load_config(path))
             self._append_log(f"Loaded config: {path}")
 
+    def _append_log_if_ready(self, message: str) -> None:
+        if "log" in self.__dict__:
+            self._append_log(message)
+
 
 def _coerce_var_value(key: str, value: str) -> str | int | float:
-    if key == "cadata_path":
+    if key in {"cadata_path", "conductor_name"}:
         return value
     if key in {"n_blocks", "turn_min", "turn_max"}:
         return int(value)
@@ -469,7 +504,19 @@ def _first_conductor_data(records: CadataRecords) -> LayerConductorData:
     return LayerConductorData(strand=strand, cable=cable, remfit=remfit)
 
 
-def _cable_spec_from_cadata_text(text: str) -> CableSpec:
+def _resolved_conductor_data(resolution: ConductorResolution) -> LayerConductorData:
+    if resolution.strand is None or resolution.cable is None or resolution.remfit is None:
+        raise ValueError(f"CONDUCTOR record {resolution.conductor_name!r} did not resolve to margin data")
+    return LayerConductorData(strand=resolution.strand, cable=resolution.cable, remfit=resolution.remfit)
+
+
+def _resolved_cable_name(resolution: ConductorResolution) -> str:
+    if resolution.conductor is None:
+        raise ValueError(f"CONDUCTOR record {resolution.conductor_name!r} did not resolve to cable data")
+    return resolution.conductor.cable_name
+
+
+def _cable_spec_from_cadata_text(text: str, cable_name: str | None = None) -> CableSpec:
     lines = text.splitlines()
     for index, line in enumerate(lines):
         match = re.match(r"^\s*CABLE\s+(\d+)\s*$", line)
@@ -478,7 +525,7 @@ def _cable_spec_from_cadata_text(text: str) -> CableSpec:
         count = int(match.group(1))
         for row in lines[index + 1 : index + 1 + count]:
             tokens = re.findall(r"'[^']*'|\S+", row.strip())
-            if len(tokens) >= 5:
+            if len(tokens) >= 5 and (cable_name is None or tokens[1] == cable_name):
                 height = float(tokens[2])
                 width_inner = float(tokens[3])
                 width_outer = float(tokens[4])
@@ -487,7 +534,16 @@ def _cable_spec_from_cadata_text(text: str) -> CableSpec:
                     height_mm=height,
                     insulation_thickness_mm=0.0,
                 )
+    if cable_name is not None:
+        raise ValueError(f".cadata file must contain CABLE row {cable_name!r} with dimensions")
     raise ValueError(".cadata file must contain at least one CABLE row with dimensions")
+
+
+def _margin_exclusion_lines(result) -> tuple[str, ...]:  # noqa: ANN001
+    return tuple(
+        f"Margin skipped for Layer {exclusion.layer_index + 1}: {exclusion.reason}"
+        for exclusion in getattr(result, "excluded_margin_layers", ())
+    )
 
 
 def _best_candidate(result, *, max_harmonic_units: float, min_margin_percent: float):  # noqa: ANN001, ANN201
