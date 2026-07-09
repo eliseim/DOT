@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Iterator
 
 from .primitives import DipoleDesign, Point, TurnPolygon
@@ -162,21 +164,23 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
 
 def check_pole_angle_limit(
     design: DipoleDesign,
-    max_angle_deg: float,
+    max_angle_deg: float | Sequence[float],
 ) -> list[Violation]:
     """Check no turn outer edge exceeds the angular winding limit from the pole."""
 
+    limits = _max_angle_by_layer(design, max_angle_deg)
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
+        layer_limit = limits[indexed.layer_index]
         outer_edge = indexed.turn.corners[2], indexed.turn.corners[3]
         max_outer_angle = max(_angle_from_y_axis_deg(point) for point in outer_edge)
-        if max_outer_angle > max_angle_deg + _EPSILON:
+        if max_outer_angle > layer_limit + _EPSILON:
             violations.append(
                 Violation(
                     constraint_name="pole_angle_limit",
                     message=(
                         f"Turn outer edge angle {max_outer_angle:.6g} deg "
-                        f"exceeds limit {max_angle_deg:.6g} deg."
+                        f"exceeds limit {layer_limit:.6g} deg."
                     ),
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
@@ -191,7 +195,7 @@ def check_feasibility(
     *,
     aperture_radius_mm: float,
     min_gap_mm: float,
-    max_angle_deg: float,
+    max_angle_deg: float | Sequence[float],
     min_layer_clearance_mm: float = 0.1,
 ) -> FeasibilityResult:
     """Run all geometry feasibility constraints and aggregate violations."""
@@ -217,6 +221,22 @@ def _iter_layer_turns(design: DipoleDesign, layer_index: int) -> Iterator[_Index
     for block_index, block in enumerate(layer.blocks):
         for turn_index, turn in enumerate(block.turns()):
             yield _IndexedTurn(layer_index, block_index, turn_index, turn)
+
+
+def _max_angle_by_layer(
+    design: DipoleDesign,
+    max_angle_deg: float | Sequence[float],
+) -> tuple[float, ...]:
+    if isinstance(max_angle_deg, Real):
+        return tuple(float(max_angle_deg) for _ in design.layers)
+
+    limits = tuple(float(limit) for limit in max_angle_deg)
+    if len(limits) != len(design.layers):
+        raise ValueError(
+            "max_angle_deg sequence length must equal the number of design layers "
+            f"({len(limits)} != {len(design.layers)})"
+        )
+    return limits
 
 
 def _distance_origin_to_polygon(points: tuple[Point, ...]) -> float:

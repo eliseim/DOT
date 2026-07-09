@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -37,6 +37,7 @@ class OptimizationTargets:
     temperature_k: float
     max_harmonic_units: float | None = None
     min_margin_percent: float | None = None
+    max_current_a: float | None = None
     excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
 
 
@@ -45,7 +46,7 @@ class FeasibilitySettings:
     """Geometry feasibility settings passed through to task 0003 checks."""
 
     min_gap_mm: float
-    max_angle_deg: float
+    max_angle_deg: float | Sequence[float]
     min_layer_clearance_mm: float = 0.1
 
 
@@ -93,6 +94,14 @@ class DipoleOptimizationProblem(Problem):
                     continue
 
                 solved = operating_point(unit_design, self.targets.target_bore_field_t)
+                if (
+                    self.targets.max_current_a is not None
+                    and abs(solved.operating_current_a) > self.targets.max_current_a
+                ):
+                    objectives[row_index] = (_PENALTY, _PENALTY)
+                    constraints[row_index, 0] = 1.0
+                    continue
+
                 field_quality = field_quality_objective(
                     solved.design,
                     self.targets.r_ref_mm,

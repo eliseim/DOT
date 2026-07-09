@@ -29,6 +29,24 @@ def test_problem_accepts_feasible_genome() -> None:
     assert f_values[1] < 0.0
 
 
+def test_problem_marks_operating_current_above_cap_as_constraint_violation() -> None:
+    problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_current_a=200.0),
+        _feasibility(),
+    )
+    over_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0])
+    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0])
+
+    over_f, over_g = problem.evaluate(over_cap_genome, return_values_of=["F", "G"])
+    under_f, under_g = problem.evaluate(under_cap_genome, return_values_of=["F", "G"])
+
+    assert over_g[0] > 0.0
+    assert over_f[0] >= 1.0e12
+    assert under_g[0] <= 0.0
+    assert under_f[0] < 1.0e12
+
+
 def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> None:
     cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
     topology = Topology(
@@ -85,13 +103,14 @@ def _topology() -> Topology:
     )
 
 
-def _targets() -> OptimizationTargets:
+def _targets(*, max_current_a: float | None = None) -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.02,
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(conductor_data(),),
         temperature_k=0.0,
+        max_current_a=max_current_a,
     )
 
 
