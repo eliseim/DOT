@@ -26,9 +26,10 @@ def test_state_round_trips_loaded_feasibility(monkeypatch) -> None:  # noqa: ANN
     loaded_state = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE)
     loaded_state["feasibility"] = {
         "min_gap_mm": 0.25,
-        "max_angle_deg": 65.0,
+        "max_angle_deg": (65.0,),
         "min_layer_clearance_mm": 0.5,
     }
+    loaded_state["layers"][0]["max_angle_deg"] = 65.0
 
     monkeypatch.setattr(target_synthesis_gui.tk, "StringVar", FakeVar)
     monkeypatch.setattr(target_synthesis_gui.App, "_sync_layer_rows", lambda self: None)
@@ -36,6 +37,17 @@ def test_state_round_trips_loaded_feasibility(monkeypatch) -> None:  # noqa: ANN
     target_synthesis_gui.App._apply_state(app, loaded_state)
 
     assert target_synthesis_gui.App._state(app)["feasibility"] == loaded_state["feasibility"]
+
+
+def test_state_uses_per_layer_angle_and_current_defaults() -> None:
+    app = _app_shell()
+    app.n_layers_var.set(3)
+    app.layer_vars = [_layer_vars(index) for index in range(3)]
+
+    state = target_synthesis_gui.App._state(app)
+
+    assert state["acceptance"]["max_current_a"] == pytest.approx(13000.0)
+    assert state["feasibility"]["max_angle_deg"] == (80.0, 85.0, 85.0)
 
 
 @pytest.mark.parametrize("raw_n_layers", [0, -2])
@@ -131,12 +143,16 @@ CONDUCTOR 2
     state["layers"][1]["conductor_name"] = "LF"
     state["layers"][1]["inner_radius_min_mm"] = 24.0
     state["layers"][1]["inner_radius_max_mm"] = 26.0
+    state["layers"][1]["max_angle_deg"] = 85.0
+    state["acceptance"]["max_current_a"] = 12345.0
     app._state = lambda: state
 
-    topology, targets, _ = target_synthesis_gui.App._campaign_inputs(app)
+    topology, targets, feasibility = target_synthesis_gui.App._campaign_inputs(app)
 
     assert topology.cables["layer-1"].width_mm == pytest.approx(2.0)
     assert topology.cables["layer-2"].width_mm == pytest.approx(5.0)
+    assert targets.max_current_a == pytest.approx(12345.0)
+    assert feasibility.max_angle_deg == (80.0, 85.0)
     assert targets.cadata_by_layer[0] is None
     assert targets.cadata_by_layer[1] is not None
     assert targets.cadata_by_layer[1].strand.diameter_mm == pytest.approx(1.065)
@@ -153,6 +169,7 @@ def _app_shell():
     app.temperature_var = FakeVar("0.0")
     app.max_harmonic_var = FakeVar("1000.0")
     app.min_margin_var = FakeVar("10.0")
+    app.max_current_var = FakeVar("13000.0")
     app.pop_size_var = FakeVar("8")
     app.n_gen_var = FakeVar("3")
     app.seed_var = FakeVar("7")
@@ -164,4 +181,5 @@ def _app_shell():
 def _layer_vars(index: int) -> dict[str, FakeVar]:
     layer = copy.deepcopy(target_synthesis_gui.DEFAULT_STATE["layers"][0])
     layer["cadata_path"] = f"layer-{index + 1}.cadata"
+    layer["max_angle_deg"] = target_synthesis_gui._default_max_angle_deg(index)
     return {key: FakeVar(str(value)) for key, value in layer.items()}

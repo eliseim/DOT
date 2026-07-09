@@ -24,6 +24,10 @@ from .campaign_runner import CampaignEvent, CampaignRunner
 from .config_io import load_config, save_config
 from .cross_section_plot import cross_section_figure
 
+DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG = 80.0
+DEFAULT_OUTER_LAYER_MAX_ANGLE_DEG = 85.0
+DEFAULT_MAX_CURRENT_A = 13000.0
+
 DEFAULT_STATE: dict[str, Any] = {
     "target_bore_field_t": 0.02,
     "aperture_radius_mm": 8.0,
@@ -32,6 +36,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "acceptance": {
         "max_harmonic_units": 1000.0,
         "min_margin_percent": 10.0,
+        "max_current_a": DEFAULT_MAX_CURRENT_A,
     },
     "nsga2": {
         "pop_size": 8,
@@ -40,7 +45,7 @@ DEFAULT_STATE: dict[str, Any] = {
     },
     "feasibility": {
         "min_gap_mm": 0.1,
-        "max_angle_deg": 80.0,
+        "max_angle_deg": (DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG,),
         "min_layer_clearance_mm": 0.1,
     },
     "layers": [
@@ -54,6 +59,7 @@ DEFAULT_STATE: dict[str, Any] = {
             "inner_radius_max_mm": 22.0,
             "phi_min_deg": 10.0,
             "phi_max_deg": 70.0,
+            "max_angle_deg": DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG,
         }
     ],
 }
@@ -79,6 +85,7 @@ class App(tk.Tk):
         self.temperature_var = tk.StringVar()
         self.max_harmonic_var = tk.StringVar()
         self.min_margin_var = tk.StringVar()
+        self.max_current_var = tk.StringVar()
         self.pop_size_var = tk.StringVar()
         self.n_gen_var = tk.StringVar()
         self.seed_var = tk.StringVar()
@@ -139,6 +146,7 @@ class App(tk.Tk):
         frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self._entry(frame, "Max |harmonic| [1e-4]", self.max_harmonic_var, 0)
         self._entry(frame, "Min load-line margin [%]", self.min_margin_var, 1)
+        self._entry(frame, "Max current [A]", self.max_current_var, 2)
 
     def _build_nsga(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="NSGA-II Parameters", padding=8)
@@ -207,6 +215,7 @@ class App(tk.Tk):
             "inner_radius_max_mm": tk.StringVar(value=f"{radius_min + 2.0:.3g}"),
             "phi_min_deg": tk.StringVar(value=str(state["phi_min_deg"])),
             "phi_max_deg": tk.StringVar(value=str(state["phi_max_deg"])),
+            "max_angle_deg": tk.StringVar(value=str(_default_max_angle_deg(index))),
         }
 
     def _layer_row(self, index: int, variables: dict[str, tk.StringVar]) -> None:
@@ -230,6 +239,7 @@ class App(tk.Tk):
             ("R max", "inner_radius_max_mm"),
             ("Phi min", "phi_min_deg"),
             ("Phi max", "phi_max_deg"),
+            ("Max pole angle [deg]", "max_angle_deg"),
         ]
         for column, (label, key) in enumerate(labels):
             ttk.Label(frame, text=label).grid(row=2, column=column, sticky="w", padx=(0, 4))
@@ -410,11 +420,12 @@ class App(tk.Tk):
             temperature_k=float(state["temperature_k"]),
             max_harmonic_units=float(state["acceptance"]["max_harmonic_units"]),
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
+            max_current_a=state["acceptance"].get("max_current_a"),
             excluded_margin_layers=tuple(margin_exclusions),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=float(state["feasibility"]["min_gap_mm"]),
-            max_angle_deg=float(state["feasibility"]["max_angle_deg"]),
+            max_angle_deg=tuple(float(layer["max_angle_deg"]) for layer in state["layers"]),
             min_layer_clearance_mm=float(state["feasibility"]["min_layer_clearance_mm"]),
         )
         return topology, targets, feasibility
@@ -429,13 +440,20 @@ class App(tk.Tk):
             "acceptance": {
                 "max_harmonic_units": float(self.max_harmonic_var.get()),
                 "min_margin_percent": float(self.min_margin_var.get()),
+                "max_current_a": _optional_float(self.max_current_var.get()),
             },
             "nsga2": {
                 "pop_size": int(self.pop_size_var.get()),
                 "n_gen": int(self.n_gen_var.get()),
                 "seed": int(self.seed_var.get()) if self.seed_var.get().strip() else None,
             },
-            "feasibility": dict(self.feasibility_settings),
+            "feasibility": {
+                **self.feasibility_settings,
+                "max_angle_deg": tuple(
+                    float(variables["max_angle_deg"].get())
+                    for variables in self.layer_vars[:n_layers]
+                ),
+            },
             "layers": [
                 {
                     key: _coerce_var_value(key, variable.get())
@@ -446,19 +464,31 @@ class App(tk.Tk):
         }
 
     def _apply_state(self, state: dict[str, Any]) -> None:
-        self.feasibility_settings = dict(state.get("feasibility", DEFAULT_STATE["feasibility"]))
+        self.feasibility_settings = {
+            **DEFAULT_STATE["feasibility"],
+            **state.get("feasibility", {}),
+        }
         self.target_field_var.set(str(state["target_bore_field_t"]))
         self.aperture_var.set(str(state["aperture_radius_mm"]))
         self.n_layers_var.set(int(state["n_layers"]))
         self.temperature_var.set(str(state["temperature_k"]))
         self.max_harmonic_var.set(str(state["acceptance"]["max_harmonic_units"]))
         self.min_margin_var.set(str(state["acceptance"]["min_margin_percent"]))
+        self.max_current_var.set(
+            _optional_float_text(state["acceptance"].get("max_current_a", DEFAULT_MAX_CURRENT_A))
+        )
         self.pop_size_var.set(str(state["nsga2"]["pop_size"]))
         self.n_gen_var.set(str(state["nsga2"]["n_gen"]))
         self.seed_var.set("" if state["nsga2"].get("seed") is None else str(state["nsga2"]["seed"]))
         self.layer_vars = []
-        for layer in state["layers"]:
+        layer_angles_in_state = any("max_angle_deg" in layer for layer in state["layers"])
+        for index, layer in enumerate(state["layers"]):
             merged_layer = {**DEFAULT_STATE["layers"][0], **layer}
+            if not layer_angles_in_state:
+                merged_layer["max_angle_deg"] = _max_angle_from_feasibility(
+                    self.feasibility_settings["max_angle_deg"],
+                    index,
+                )
             self.layer_vars.append({key: tk.StringVar(value=str(value)) for key, value in merged_layer.items()})
         self._sync_layer_rows()
 
@@ -492,6 +522,33 @@ def _coerce_var_value(key: str, value: str) -> str | int | float:
     if key in {"n_blocks", "turn_min", "turn_max"}:
         return int(value)
     return float(value)
+
+
+def _default_max_angle_deg(layer_index: int) -> float:
+    if layer_index == 0:
+        return DEFAULT_FIRST_LAYER_MAX_ANGLE_DEG
+    return DEFAULT_OUTER_LAYER_MAX_ANGLE_DEG
+
+
+def _max_angle_from_feasibility(value: Any, layer_index: int) -> float:
+    if isinstance(value, (list, tuple)):
+        if layer_index < len(value):
+            return float(value[layer_index])
+        return _default_max_angle_deg(layer_index)
+    return float(value)
+
+
+def _optional_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    return float(text)
+
+
+def _optional_float_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
 
 
 def _first_conductor_data(records: CadataRecords) -> LayerConductorData:

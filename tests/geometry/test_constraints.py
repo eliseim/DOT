@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer, TurnPolygon
 from dot.geometry.constraints import (
     check_aperture_clearance,
@@ -186,6 +188,28 @@ def test_pole_angle_limit_rejects_outer_edge_above_limit() -> None:
     assert violations[0].turn_index == 0
 
 
+def test_pole_angle_limit_applies_per_layer_limits() -> None:
+    design = DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(
+            Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(82.0)),)),
+            Layer(inner_radius_mm=14.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(84.0)),)),
+        ),
+    )
+
+    assert check_pole_angle_limit(design, max_angle_deg=85.0) == []
+
+    violations = check_pole_angle_limit(design, max_angle_deg=(80.0, 85.0))
+
+    assert [violation.constraint_name for violation in violations] == ["pole_angle_limit"]
+    assert violations[0].layer_index == 0
+
+
+def test_pole_angle_limit_rejects_per_layer_length_mismatch() -> None:
+    with pytest.raises(ValueError, match="sequence length must equal"):
+        check_pole_angle_limit(_valid_two_layer_design(), max_angle_deg=(80.0,))
+
+
 def test_check_feasibility_accepts_valid_hand_constructed_design() -> None:
     result = check_feasibility(
         _valid_two_layer_design(),
@@ -294,6 +318,23 @@ def _layer(*, inner_radius_mm: float, phi_deg: float, cable: CableSpec) -> Layer
             ),
         ),
     )
+
+
+def _turn_with_outer_angle(angle_deg: float) -> TurnPolygon:
+    return TurnPolygon(
+        corners=(
+            _point_at_angle(angle_deg - 2.0, 10.0),
+            _point_at_angle(angle_deg - 2.0, 11.0),
+            _point_at_angle(angle_deg, 12.0),
+            _point_at_angle(angle_deg, 13.0),
+        ),
+        current_a=1000.0,
+    )
+
+
+def _point_at_angle(angle_deg: float, radius_mm: float) -> tuple[float, float]:
+    angle_rad = math.radians(angle_deg)
+    return (radius_mm * math.sin(angle_rad), radius_mm * math.cos(angle_rad))
 
 
 def test_sat_overlap_test_uses_finite_polygons_not_radius_envelopes() -> None:
