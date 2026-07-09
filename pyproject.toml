@@ -17,6 +17,9 @@ dev = [
     "pytest",
     "ruff",
 ]
+optimization = [
+    "pymoo>=0.6",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
