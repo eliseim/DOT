@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 
-from .cadata import CableRecord, StrandRecord, Type1FitCoefficients
+from .cadata import CableRecord, RemfitCoefficients, StrandRecord
 from .critical_current import cable_critical_current
-from .critical_surface import critical_current_density
+from .critical_surface import critical_current_density_for_fit, upper_critical_field
 
 
 def solve_short_sample_current(
-    coeffs: Type1FitCoefficients,
+    coeffs: RemfitCoefficients,
     strand: StrandRecord,
     cable: CableRecord,
     temperature_k: float,
@@ -78,7 +78,7 @@ def load_line_margin_percent(i_operating: float, i_short_sample: float) -> float
 
 
 def _equation(
-    coeffs: Type1FitCoefficients,
+    coeffs: RemfitCoefficients,
     strand: StrandRecord,
     cable: CableRecord,
     temperature_k: float,
@@ -86,21 +86,15 @@ def _equation(
     current_a: float,
 ) -> float:
     field_t = k_field_per_current * current_a
-    jc = critical_current_density(field_t, temperature_k, coeffs)
+    jc = critical_current_density_for_fit(field_t, temperature_k, coeffs)
     value = cable_critical_current(jc, strand, cable) - current_a
     if not math.isfinite(value):
         raise ValueError("load-line equation produced a non-finite value")
     return value
 
 
-def _bc2(coeffs: Type1FitCoefficients, temperature_k: float) -> float:
-    if not math.isfinite(temperature_k):
-        raise ValueError("temperature_k must be finite")
-    if temperature_k < 0.0:
-        raise ValueError("temperature_k must be non-negative")
-    if temperature_k >= coeffs.c2:
-        raise ValueError("temperature_k must be less than Tc0")
-    return coeffs.c7 * (1.0 - (temperature_k / coeffs.c2) ** 1.7)
+def _bc2(coeffs: RemfitCoefficients, temperature_k: float) -> float:
+    return upper_critical_field(coeffs, temperature_k)
 
 
 def _require_finite_positive(value: float, name: str) -> None:

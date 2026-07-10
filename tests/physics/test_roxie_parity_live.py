@@ -154,6 +154,42 @@ def test_live_roxie_peak_field_and_margin_parity_cth_lf(tmp_path: Path) -> None:
     )
 
 
+def test_live_roxie_peak_field_and_margin_parity_cth_hf_and_mixed(tmp_path: Path) -> None:
+    _require_live_roxie()
+
+    cases = (
+        (
+            "cth_hf_single_turn_r34_phi36",
+            _cth_margin_design(((34.0, 36.0, 1, CTH_HF),)),
+            ("CTH_HF",),
+        ),
+        (
+            "cth_hf_lf_mixed_two_layer",
+            _cth_margin_design(((33.0, 30.0, 1, CTH_HF), (55.0, 50.0, 1, CTH_LF))),
+            ("CTH_HF", "CTH_LF"),
+        ),
+    )
+    comparisons = tuple(
+        _cth_peak_and_margin_comparison(tmp_path, case_name, design, conductor_names)
+        for case_name, design, conductor_names in cases
+    )
+
+    print("\n--- CTH_HF and Mixed Peak Field and Margin Parity Results ---")
+    for c in comparisons:
+        print(f"CASE {c.case_name}:")
+        print(f"  DOT Peak Field: {c.dot_peak_t:.6f} T, ROXIE Peak Field: {c.roxie_peak_t:.6f} T")
+        print(f"  Peak Field Rel Error: {c.peak_relative_error * 100:.4f}%")
+        print(f"  DOT Margin: {c.dot_margin_percent:.4f}%, ROXIE Margin: {c.roxie_margin_percent:.4f}%")
+        print(f"  Margin Error pp: {c.margin_error_percentage_points:.4f}")
+    print("------------------------------------------------------------\n")
+
+    assert all(comparison.peak_relative_error < FIELD_TOLERANCE_REL for comparison in comparisons)
+    assert all(
+        comparison.margin_error_percentage_points < MARGIN_TOLERANCE_PERCENTAGE_POINTS
+        for comparison in comparisons
+    )
+
+
 def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
     unit_current_design = _alpha_zero_single_block_design(current_a=1.0)
     unit_field_t = _dot_field(unit_current_design)
@@ -246,6 +282,16 @@ def _cth_lf_margin_cases() -> tuple[tuple[str, DipoleDesign], ...]:
 
 
 def _cth_lf_design(records: tuple[tuple[float, float, int], ...], current_a: float = 1.0) -> DipoleDesign:
+    return _cth_margin_design(
+        tuple((radius_mm, phi_deg, n_turns, CTH_LF) for radius_mm, phi_deg, n_turns in records),
+        current_a=current_a,
+    )
+
+
+def _cth_margin_design(
+    records: tuple[tuple[float, float, int, CableSpec], ...],
+    current_a: float = 1.0,
+) -> DipoleDesign:
     return DipoleDesign(
         aperture_radius_mm=25.0,
         layers=tuple(
@@ -256,13 +302,13 @@ def _cth_lf_design(records: tuple[tuple[float, float, int], ...], current_a: flo
                         phi_deg=phi_deg,
                         alpha_deg=0.0,
                         n_turns=n_turns,
-                        cable=CTH_LF,
+                        cable=cable,
                         inner_radius_mm=radius_mm,
                         current_a=current_a,
                     ),
                 ),
             )
-            for radius_mm, phi_deg, n_turns in records
+            for radius_mm, phi_deg, n_turns, cable in records
         ),
     )
 
@@ -305,8 +351,25 @@ def _cth_lf_peak_and_margin_comparison(
     case_name: str,
     unit_current_design: DipoleDesign,
 ) -> LiveMarginComparison:
+    return _cth_peak_and_margin_comparison(
+        tmp_path,
+        case_name,
+        unit_current_design,
+        tuple("CTH_LF" for _ in unit_current_design.layers),
+    )
+
+
+def _cth_peak_and_margin_comparison(
+    tmp_path: Path,
+    case_name: str,
+    unit_current_design: DipoleDesign,
+    conductor_names_by_layer: tuple[str, ...],
+) -> LiveMarginComparison:
     solved = operating_point(unit_current_design, 1.0)
-    records = tuple(_cth_lf_block_record(number, block) for number, block in enumerate(_all_blocks(solved.design), start=1))
+    records = tuple(
+        _cth_margin_block_record(number, block, conductor_names_by_layer[layer_index])
+        for number, (layer_index, block) in enumerate(_all_indexed_blocks(solved.design), start=1)
+    )
     data_file = _write_no_iron_data_file(tmp_path, case_name, records, r_ref_mm=25.0)
     output_dir = tmp_path / f"{case_name}_output"
     output_dir.mkdir()
@@ -315,20 +378,23 @@ def _cth_lf_peak_and_margin_comparison(
     roxie_margin_percent = 100.0 - roxie_loadline_percent
 
     cadata_text = ROXIE_CADATA.read_text(encoding="utf-8", errors="replace")
-    conductor = resolve_conductor(cadata_text, "CTH_LF")
-    if not conductor.is_resolved:
-        pytest.fail(f"CTH_LF conductor did not resolve: {conductor.status} {conductor.message}")
-    layer_data = LayerConductorData(
-        strand=conductor.strand,
-        cable=conductor.cable,
-        remfit=conductor.remfit,
+    conductors = tuple(resolve_conductor(cadata_text, conductor_name) for conductor_name in conductor_names_by_layer)
+    for conductor_name, conductor in zip(conductor_names_by_layer, conductors, strict=True):
+        if not conductor.is_resolved:
+            pytest.fail(f"{conductor_name} conductor did not resolve: {conductor.status} {conductor.message}")
+    cadata_by_layer = tuple(
+        LayerConductorData(
+            strand=conductor.strand,
+            cable=conductor.cable,
+            remfit=conductor.remfit,
+        )
+        for conductor in conductors
     )
-    cadata_by_layer = tuple(layer_data for _ in solved.design.layers)
     dot_margin_percent = load_line_margin_objective(
         solved.design,
         cable_specs_by_layer=tuple(layer.blocks[0].cable for layer in solved.design.layers),
         cadata_by_layer=cadata_by_layer,
-        temperature_k=conductor.temperature_k,
+        temperature_k=conductors[0].temperature_k,
     )
     _, dot_peak_t = _peak_field_on_own_turns(solved.design, evaluated_layers=tuple(range(len(solved.design.layers))))
     return LiveMarginComparison(
@@ -346,7 +412,15 @@ def _all_blocks(design: DipoleDesign) -> tuple[Block, ...]:
     return tuple(block for layer in design.layers for block in layer.blocks)
 
 
-def _cth_lf_block_record(number: int, block: Block) -> RoxieBlockRecord:
+def _all_indexed_blocks(design: DipoleDesign) -> tuple[tuple[int, Block], ...]:
+    return tuple(
+        (layer_index, block)
+        for layer_index, layer in enumerate(design.layers)
+        for block in layer.blocks
+    )
+
+
+def _cth_margin_block_record(number: int, block: Block, conductor_name: str) -> RoxieBlockRecord:
     return RoxieBlockRecord(
         number=number,
         n_turns=block.n_turns,
@@ -354,8 +428,8 @@ def _cth_lf_block_record(number: int, block: Block) -> RoxieBlockRecord:
         phi_roxie_deg=90.0 - block.phi_deg,
         alpha_roxie_deg=-block.alpha_deg,
         current_a=block.current_a,
-        conductor_name="CTH_LF",
-        n2=15,
+        conductor_name=conductor_name,
+        n2=20 if conductor_name == "CTH_HF" else 15,
     )
 
 

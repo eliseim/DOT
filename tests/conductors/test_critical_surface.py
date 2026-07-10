@@ -5,6 +5,8 @@ import math
 import pytest
 
 from dot.conductors import Type1FitCoefficients, critical_current_density
+from dot.conductors.cadata import Type11FitCoefficients
+from dot.conductors.critical_surface import critical_current_density_nb3sn, upper_critical_field
 
 
 COEFFS = Type1FitCoefficients(
@@ -15,6 +17,15 @@ COEFFS = Type1FitCoefficients(
     c5=2.32,
     c6=27.04,
     c7=14.5,
+)
+HFM1 = Type11FitCoefficients(
+    c0=2.14462e11,
+    bc20_t=29.38,
+    tc0_k=16.0,
+    alpha=0.96,
+    v=1.52,
+    p=0.5,
+    q=2.0,
 )
 
 
@@ -31,6 +42,18 @@ def _expected_jc(b_field_t: float, temperature_k: float, coeffs: Type1FitCoeffic
         * (1.0 - reduced_field) ** coeffs.c4
         * (1.0 - reduced_temperature_power) ** coeffs.c5
     )
+
+
+def _expected_nb3sn_jc(
+    b_field_t: float,
+    temperature_k: float,
+    coeffs: Type11FitCoefficients,
+) -> float:
+    t = temperature_k / coeffs.tc0_k
+    bc2_t = coeffs.bc20_t * (1.0 - t**coeffs.v)
+    b = b_field_t / bc2_t
+    c_t = coeffs.c0 * (1.0 - t**coeffs.v) ** coeffs.alpha * (1.0 - t**2) ** coeffs.alpha
+    return c_t / b_field_t * b**coeffs.p * (1.0 - b) ** coeffs.q
 
 
 @pytest.mark.parametrize(
@@ -105,3 +128,47 @@ def test_critical_current_density_rejects_invalid_physical_inputs(
 ) -> None:
     with pytest.raises(ValueError):
         critical_current_density(b_field_t, temperature_k, COEFFS)
+
+
+def test_critical_current_density_nb3sn_matches_type11_formula_for_hfm1() -> None:
+    assert math.isclose(
+        critical_current_density_nb3sn(12.0, 1.9, HFM1),
+        _expected_nb3sn_jc(12.0, 1.9, HFM1),
+        rel_tol=1.0e-15,
+    )
+
+
+def test_critical_current_density_nb3sn_is_finite_positive_inside_domain() -> None:
+    jc = critical_current_density_nb3sn(12.0, 1.9, HFM1)
+
+    assert math.isfinite(jc)
+    assert jc > 0.0
+
+
+def test_critical_current_density_nb3sn_tends_to_zero_at_bc2() -> None:
+    temperature_k = 1.9
+    bc2_t = upper_critical_field(HFM1, temperature_k)
+
+    farther = critical_current_density_nb3sn(bc2_t * (1.0 - 1.0e-3), temperature_k, HFM1)
+    nearer = critical_current_density_nb3sn(bc2_t * (1.0 - 1.0e-6), temperature_k, HFM1)
+
+    assert nearer < farther
+    assert nearer < 1.0e-5 * farther
+
+
+@pytest.mark.parametrize(
+    ("b_field_t", "temperature_k"),
+    [
+        (-1.0, 1.9),
+        (1.0, -1.0),
+        (1.0, 16.0),
+        (40.0, 1.9),
+        (0.0, 1.9),
+    ],
+)
+def test_critical_current_density_nb3sn_rejects_invalid_physical_inputs(
+    b_field_t: float,
+    temperature_k: float,
+) -> None:
+    with pytest.raises(ValueError):
+        critical_current_density_nb3sn(b_field_t, temperature_k, HFM1)

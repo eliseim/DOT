@@ -9,8 +9,7 @@ from dot.conductors import (
     UnsupportedFitTypeError,
     parse_cadata_text,
 )
-from dot.conductors.cadata import find_type1_remfit
-from dot.conductors.cadata import resolve_conductor
+from dot.conductors.cadata import Type11FitCoefficients, find_type1_remfit, resolve_conductor
 
 
 def test_parse_cadata_text_extracts_strand_cable_and_type1_remfit() -> None:
@@ -44,17 +43,36 @@ CABLE 1
     )
 
 
-def test_parse_cadata_text_rejects_non_type1_remfit() -> None:
+def test_parse_cadata_text_extracts_type11_remfit() -> None:
     text = """
 REMFIT 1
  12 PIT192 11     1.7834E+11           30           16         0.96         1.52          0.5            2            0            0            0            0 'PIT 192 REF'
 """
 
+    records = parse_cadata_text(text)
+
+    assert records.remfits["PIT192"] == Type11FitCoefficients(
+        c0=1.7834e11,
+        bc20_t=30.0,
+        tc0_k=16.0,
+        alpha=0.96,
+        v=1.52,
+        p=0.5,
+        q=2.0,
+    )
+
+
+def test_parse_cadata_text_rejects_unsupported_remfit() -> None:
+    text = """
+REMFIT 1
+  1 NB3SNA 5         3.5E+10           28           18            0            0            0            0            0            0            0            0 'PIT strand fit poor'
+"""
+
     with pytest.raises(UnsupportedFitTypeError) as exc_info:
         parse_cadata_text(text)
 
-    assert exc_info.value.fit_type == 11
-    assert exc_info.value.name == "PIT192"
+    assert exc_info.value.fit_type == 5
+    assert exc_info.value.name == "NB3SNA"
 
 
 def test_named_type1_remfit_ignores_unrelated_unsupported_records() -> None:
@@ -141,13 +159,27 @@ def test_real_roxie_cth_file_resolves_named_conductor_links() -> None:
         c7=14.5,
     )
 
-    assert hf.status == "unsupported_fit_type"
+    assert hf.status == "resolved"
     assert hf.conductor is not None
     assert hf.conductor.cable_name == "CXF150HT5"
     assert hf.conductor.remfit_name == "NB3SNMP"
     assert hf.remfit_name == "HFM1"
-    assert hf.unsupported_fit_type == 11
-    assert "unsupported REMFIT type 11" in hf.message
+    assert hf.temperature_k == pytest.approx(1.9)
+    assert hf.strand is not None
+    assert hf.strand.diameter_mm == pytest.approx(0.85)
+    assert hf.strand.cu_to_sc_ratio == pytest.approx(0.9)
+    assert hf.cable is not None
+    assert hf.cable.n_strands == 40
+    assert hf.cable.degradation_percent == pytest.approx(5.0)
+    assert hf.remfit == Type11FitCoefficients(
+        c0=2.14462e11,
+        bc20_t=29.38,
+        tc0_k=16.0,
+        alpha=0.96,
+        v=1.52,
+        p=0.5,
+        q=2.0,
+    )
 
 
 def test_resolve_conductor_reports_name_not_found() -> None:
