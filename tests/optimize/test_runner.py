@@ -124,7 +124,7 @@ def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
     random_feasible = _feasible_count(topology, feasibility, random_genomes)
     constructive_feasible = _feasible_count(topology, feasibility, constructive_genomes)
 
-    assert random_feasible == 139
+    assert random_feasible == 177
     assert constructive_feasible == 200
     assert constructive_feasible > random_feasible
 
@@ -176,12 +176,15 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
         "layer_0_block_0_n_turns": 1,
         "layer_0_block_1_phi_deg": 55.0,
         "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
         "layer_0_block_1_alpha_deg": 0.0,
         "layer_0_block_2_phi_deg": 32.0,
         "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": True,
         "layer_0_block_2_alpha_deg": 0.0,
         "layer_0_block_3_phi_deg": 8.0,
         "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
 

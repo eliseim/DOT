@@ -62,14 +62,20 @@ class ConstructiveMixedVariableSampling(Sampling):
                     by_layer.setdefault(variable.layer_index, []).append(
                         (variable.name, variable.block_index, variable.bounds)
                     )
-                    continue
                 lower, upper = variable.bounds
-                if variable.kind == "integer":
+                if variable.kind == "binary":
+                    sample[variable.name] = bool(rng.integers(0, 2))
+                elif variable.kind == "integer":
                     sample[variable.name] = int(rng.integers(int(lower), int(upper) + 1))
                 else:
                     sample[variable.name] = float(rng.uniform(lower, upper))
 
             for layer_index, phi_variables in by_layer.items():
+                active_phi_variables = [
+                    item for item in phi_variables if _block_is_active(sample, layer_index, item[1])
+                ]
+                if not active_phi_variables:
+                    continue
                 layer = self.topology.layers[layer_index]
                 radius_name = f"layer_{layer_index}_inner_radius_mm"
                 radius = float(sample[radius_name])
@@ -78,7 +84,7 @@ class ConstructiveMixedVariableSampling(Sampling):
                     self.topology.cables[layer.cable_id].insulated_width_inner_mm,
                     self.feasibility.min_gap_mm,
                 )
-                phis = _ordered_phi_values(phi_variables, min_gap_deg, rng)
+                phis = _ordered_phi_values(active_phi_variables, min_gap_deg, rng)
                 for name, phi in phis.items():
                     sample[name] = phi
 
@@ -110,6 +116,7 @@ class PhiOrderingRepair(Repair):
                 if variable.layer_index == layer_index
                 and variable.block_index is not None
                 and variable.name.endswith("_phi_deg")
+                and _block_is_active(sample, layer_index, variable.block_index)
             ]
             if len(phi_variables) < 2:
                 continue
@@ -231,6 +238,12 @@ def _ordered_phi_values(
         values[name] = phi
         previous = phi
     return values
+
+
+def _block_is_active(sample: dict[str, float | int], layer_index: int, block_index: int) -> bool:
+    if block_index == 0:
+        return True
+    return bool(sample.get(f"layer_{layer_index}_block_{block_index}_active", True))
 
 
 def _margin_exclusions(targets: OptimizationTargets) -> tuple[MarginEvaluationExclusion, ...]:

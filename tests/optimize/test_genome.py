@@ -6,6 +6,7 @@ import pytest
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.geometry.constraints import check_feasibility
 from dot.optimize import LayerTopology, Topology, decode, encode, genome_bounds
+from dot.optimize.genome import genome_variables, mixed_variable_spec
 
 
 def test_encode_decode_round_trips_fixed_topology_variables() -> None:
@@ -91,7 +92,7 @@ def test_encode_decode_round_trips_fixed_topology_variables() -> None:
     genome = encode(design)
     decoded = decode(genome, topology, topology.cables)
 
-    assert topology.n_var == 15
+    assert topology.n_var == 18
     assert genome.shape == (topology.n_var,)
     assert genome.tolist() == [
         12.0,
@@ -99,15 +100,18 @@ def test_encode_decode_round_trips_fixed_topology_variables() -> None:
         2.0,
         38.0,
         3.0,
+        1.0,
         22.5,
         24.0,
         20.0,
         1.0,
         40.0,
         2.0,
+        1.0,
         -3.5,
         55.0,
         4.0,
+        1.0,
         66.0,
     ]
     assert decoded.layers[0].inner_radius_mm == pytest.approx(12.0)
@@ -147,10 +151,46 @@ def test_first_block_alpha_is_not_a_genome_slot() -> None:
         cables={"inner": cable},
     )
 
-    decoded = decode([12.0, 12.0, 2.0, 38.0, 3.0, 45.0], topology, topology.cables)
+    decoded = decode([12.0, 12.0, 2.0, 38.0, 3.0, 1.0, 45.0], topology, topology.cables)
 
-    assert topology.n_var == 6
+    assert topology.n_var == 7
     assert [block.alpha_deg for block in decoded.layers[0].blocks] == [0.0, 45.0]
+
+
+def test_optional_block_active_genes_control_decoded_block_count() -> None:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(10.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-10.0, 70.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+
+    base = [12.0, 5.0, 1.0, 25.0, 2.0, 0.0, 10.0, 45.0, 3.0, 0.0, 20.0, 65.0, 4.0, 0.0, 30.0]
+    expected_phis = {
+        (0.0, 0.0, 0.0): [5.0],
+        (1.0, 0.0, 0.0): [5.0, 25.0],
+        (1.0, 1.0, 0.0): [5.0, 25.0, 45.0],
+        (1.0, 1.0, 1.0): [5.0, 25.0, 45.0, 65.0],
+        (0.0, 1.0, 0.0): [5.0, 45.0],
+        (0.0, 0.0, 1.0): [5.0, 65.0],
+        (1.0, 0.0, 1.0): [5.0, 25.0, 65.0],
+    }
+    for active_values, phis in expected_phis.items():
+        genome = list(base)
+        genome[5], genome[9], genome[13] = active_values
+
+        decoded = decode(genome, topology, topology.cables)
+
+        assert [block.phi_deg for block in decoded.layers[0].blocks] == phis
 
 
 def test_genome_bounds_match_topology_order() -> None:
@@ -185,18 +225,21 @@ def test_genome_bounds_match_topology_order() -> None:
             10.0,
             5.0,
             1.0,
-            32.5,
+                32.5,
+                1.0,
+                0.0,
+                -10.0,
+                22.0,
+                15.0,
             1.0,
-            -10.0,
-            22.0,
-            15.0,
-            1.0,
-            36.66666666666667,
-            1.0,
-            -5.0,
-            58.333333333333336,
-            1.0,
-            -5.0,
+                36.66666666666667,
+                1.0,
+                0.0,
+                -5.0,
+                58.333333333333336,
+                1.0,
+                0.0,
+                -5.0,
         ]
     )
     assert upper.tolist() == pytest.approx(
@@ -204,18 +247,21 @@ def test_genome_bounds_match_topology_order() -> None:
             20.0,
             32.5,
             5.0,
-            60.0,
-            5.0,
-            70.0,
-            30.0,
-            36.66666666666667,
+                60.0,
+                5.0,
+                1.0,
+                70.0,
+                30.0,
+                36.66666666666667,
             6.0,
-            58.333333333333336,
-            6.0,
-            68.0,
-            80.0,
-            6.0,
-            68.0,
+                58.333333333333336,
+                6.0,
+                1.0,
+                68.0,
+                80.0,
+                6.0,
+                1.0,
+                68.0,
         ]
     )
 
@@ -237,7 +283,7 @@ def test_genome_bounds_partitions_four_block_phi_window() -> None:
 
     lower, upper = genome_bounds(topology)
 
-    phi_slots = [1, 3, 6, 9]
+    phi_slots = [1, 3, 7, 11]
     assert lower[phi_slots].tolist() == pytest.approx([2.0, 21.0, 40.0, 59.0])
     assert upper[phi_slots].tolist() == pytest.approx([21.0, 40.0, 59.0, 78.0])
 
@@ -280,18 +326,18 @@ def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -
         cables={"inner": cable},
     )
     old_lower = np.array(
-        [20.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0]
+        [20.0, 2.0, 1.0, 2.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 0.0]
     )
     old_upper = np.array(
-        [20.0, 78.0, 1.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0]
+        [20.0, 78.0, 1.0, 78.0, 1.0, 1.0, 0.0, 78.0, 1.0, 1.0, 0.0, 78.0, 1.0, 1.0, 0.0]
     )
     new_lower, new_upper = genome_bounds(topology)
 
     old_feasible = _sample_feasible_count(topology, old_lower, old_upper)
     new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
 
-    assert old_feasible == 48
-    assert new_feasible == 139
+    assert old_feasible == 42
+    assert new_feasible == 177
     assert new_feasible >= old_feasible + 50
 
 
@@ -328,3 +374,98 @@ def test_layer_topology_validates_alpha_bounds_order() -> None:
             n_turns_bounds=(1, 5),
             alpha_bounds_deg=(70.0, -10.0),
         )
+
+
+def test_genome_indexing_and_bounds_consistency() -> None:
+    cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=10.0,
+        layers=(
+            LayerTopology(
+                cable_id="c1",
+                n_blocks=1,
+                inner_radius_bounds_mm=(12.0, 15.0),
+                phi_bounds_deg=(5.0, 60.0),
+                n_turns_bounds=(1, 5),
+            ),
+            LayerTopology(
+                cable_id="c2",
+                n_blocks=3,
+                inner_radius_bounds_mm=(18.0, 22.0),
+                phi_bounds_deg=(10.0, 70.0),
+                n_turns_bounds=(1, 4),
+            ),
+            LayerTopology(
+                cable_id="c3",
+                n_blocks=2,
+                inner_radius_bounds_mm=(25.0, 30.0),
+                phi_bounds_deg=(15.0, 80.0),
+                n_turns_bounds=(2, 6),
+            ),
+        ),
+        cables={"c1": cable, "c2": cable, "c3": cable},
+    )
+
+    assert topology.n_var == 21
+
+    lower, upper = genome_bounds(topology)
+    assert lower.shape == (21,)
+    assert upper.shape == (21,)
+
+    variables = genome_variables(topology)
+    assert len(variables) == 21
+
+    for i, var in enumerate(variables):
+        assert var.index == i
+        assert var.bounds == (lower[i], upper[i])
+
+    spec = mixed_variable_spec(topology)
+    assert len(spec) == 21
+    for var in variables:
+        assert var.name in spec
+
+    design = DipoleDesign(
+        aperture_radius_mm=10.0,
+        layers=(
+            Layer(
+                inner_radius_mm=13.0,
+                blocks=(
+                    Block(phi_deg=12.0, alpha_deg=0.0, n_turns=2, cable=cable, inner_radius_mm=13.0, current_a=1.0),
+                ),
+            ),
+            Layer(
+                inner_radius_mm=19.0,
+                blocks=(
+                    Block(phi_deg=15.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=19.0, current_a=1.0),
+                    Block(phi_deg=35.0, alpha_deg=10.0, n_turns=3, cable=cable, inner_radius_mm=19.0, current_a=1.0),
+                ),
+            ),
+            Layer(
+                inner_radius_mm=26.0,
+                blocks=(
+                    Block(phi_deg=20.0, alpha_deg=0.0, n_turns=4, cable=cable, inner_radius_mm=26.0, current_a=1.0),
+                ),
+            ),
+        ),
+    )
+
+    encoded = encode(design, topology)
+    assert encoded.shape == (21,)
+
+    # Layer 0 starts at 0: [13.0, 12.0, 2.0]
+    # Layer 1 starts at 3: [19.0, 15.0, 1.0, 35.0, 3.0, active=1.0, alpha=10.0, phi2, turns2, active=0.0, alpha2]
+    # active flag at index 3 + 1 + 2 + 4 + 2 = 12 must be 0.0.
+    assert encoded[12] == 0.0
+    # Layer 2 starts at 14: [26.0, 20.0, 4.0, phi1, turns1, active=0.0, alpha1]
+    # active flag at index 14 + 1 + 2 + 2 = 19 must be 0.0.
+    assert encoded[19] == 0.0
+
+    decoded = decode(encoded, topology)
+    assert len(decoded.layers) == 3
+    assert len(decoded.layers[0].blocks) == 1
+    assert len(decoded.layers[1].blocks) == 2
+    assert len(decoded.layers[2].blocks) == 1
+
+    assert decoded.layers[1].blocks[1].phi_deg == 35.0
+    assert decoded.layers[1].blocks[1].alpha_deg == 10.0
+

@@ -41,6 +41,8 @@ class OptimizationTargets:
     max_harmonic_units: float | None = None
     min_margin_percent: float | None = None
     max_current_a: float | None = None
+    max_total_turns: int | None = None
+    max_turns_per_layer: int | None = None
     excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
 
 
@@ -75,6 +77,8 @@ class DipoleOptimizationProblem(Problem):
             n_var=topology.n_var,
             n_obj=2,
             n_ieq_constr=1
+            + int(targets.max_total_turns is not None)
+            + int(targets.max_turns_per_layer is not None)
             + int(targets.max_harmonic_units is not None)
             + int(targets.min_margin_percent is not None)
             + int(targets.max_current_a is not None),
@@ -142,6 +146,28 @@ class DipoleOptimizationProblem(Problem):
                     constraints[row_index, 0] = sum(violation.severity for violation in feasibility.violations)
                     continue
 
+                target_constraint_index = 1
+                turn_budget_violation = False
+                if self.targets.max_total_turns is not None:
+                    total_turns = sum(block.n_turns for layer in unit_design.layers for block in layer.blocks)
+                    constraints[row_index, target_constraint_index] = max(
+                        0.0,
+                        float(total_turns - self.targets.max_total_turns),
+                    )
+                    turn_budget_violation |= constraints[row_index, target_constraint_index] > 0.0
+                    target_constraint_index += 1
+                if self.targets.max_turns_per_layer is not None:
+                    per_layer_violation = sum(
+                        max(0, sum(block.n_turns for block in layer.blocks) - self.targets.max_turns_per_layer)
+                        for layer in unit_design.layers
+                    )
+                    constraints[row_index, target_constraint_index] = float(per_layer_violation)
+                    turn_budget_violation |= constraints[row_index, target_constraint_index] > 0.0
+                    target_constraint_index += 1
+                if turn_budget_violation:
+                    objectives[row_index] = (_PENALTY, _PENALTY)
+                    continue
+
                 solved = operating_point(unit_design, self.targets.target_bore_field_t)
                 field_quality = field_quality_objective(
                     solved.design,
@@ -155,7 +181,6 @@ class DipoleOptimizationProblem(Problem):
                     self.targets.temperature_k,
                 )
                 objectives[row_index] = (field_quality, -margin_percent)
-                target_constraint_index = 1
                 if harmonic_threshold_units is not None:
                     harmonic_threshold = harmonic_threshold_units / 1.0e4
                     constraints[row_index, target_constraint_index] = max(0.0, field_quality - harmonic_threshold)
