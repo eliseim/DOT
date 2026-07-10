@@ -9,6 +9,7 @@ import numpy as np
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.duplicate import NoDuplicateElimination
 from pymoo.core.mixed import MixedVariableMating
+from pymoo.core.repair import Repair
 from pymoo.core.sampling import Sampling
 from pymoo.optimize import minimize
 
@@ -85,6 +86,52 @@ class ConstructiveMixedVariableSampling(Sampling):
         return samples
 
 
+class PhiOrderingRepair(Repair):
+    """Restore per-layer block ordering after mixed-variable variation."""
+
+    def __init__(self, topology: Topology, feasibility: FeasibilitySettings) -> None:
+        super().__init__()
+        self.topology = topology
+        self.feasibility = feasibility
+        self._variables = genome_variables(topology)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        for sample in x:
+            if not isinstance(sample, dict):
+                continue
+            self._repair_sample(sample)
+        return x
+
+    def _repair_sample(self, sample: dict[str, float | int]) -> None:
+        for layer_index, layer in enumerate(self.topology.layers):
+            phi_variables = [
+                variable
+                for variable in self._variables
+                if variable.layer_index == layer_index
+                and variable.block_index is not None
+                and variable.name.endswith("_phi_deg")
+            ]
+            if len(phi_variables) < 2:
+                continue
+
+            radius = float(sample[f"layer_{layer_index}_inner_radius_mm"])
+            min_gap_deg = _minimum_phi_gap_deg(
+                radius,
+                self.topology.cables[layer.cable_id].insulated_width_inner_mm,
+                self.feasibility.min_gap_mm,
+            )
+            sorted_phis = sorted(float(sample[variable.name]) for variable in phi_variables)
+            previous = -math.inf
+            for remaining_index, variable in enumerate(sorted(phi_variables, key=lambda item: item.block_index)):
+                lower, upper = variable.bounds
+                remaining_after = len(phi_variables) - remaining_index - 1
+                max_phi = upper - remaining_after * min_gap_deg
+                repaired = max(lower, previous + min_gap_deg, sorted_phis[remaining_index])
+                repaired = min(max_phi, repaired)
+                sample[variable.name] = float(min(max(repaired, lower), upper))
+                previous = float(sample[variable.name])
+
+
 def run_campaign(
     topology: Topology,
     targets: OptimizationTargets,
@@ -131,11 +178,15 @@ def _mixed_variable_nsga2(
     feasibility: FeasibilitySettings,
     pop_size: int,
 ) -> NSGA2:
+    # pymoo's default duplicate elimination converts X to a float array, which
+    # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
+    # has a mixed-genome duplicate comparator.
     duplicate_elimination = NoDuplicateElimination()
+    repair = PhiOrderingRepair(topology, feasibility)
     return NSGA2(
         pop_size=pop_size,
         sampling=ConstructiveMixedVariableSampling(topology, feasibility),
-        mating=MixedVariableMating(eliminate_duplicates=duplicate_elimination),
+        mating=MixedVariableMating(repair=repair, eliminate_duplicates=duplicate_elimination),
         eliminate_duplicates=duplicate_elimination,
     )
 
