@@ -10,7 +10,7 @@ from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings,
 
 def test_problem_marks_overlapping_turns_as_constraint_violation() -> None:
     problem = DipoleOptimizationProblem(_topology(), _targets(), _feasibility())
-    infeasible_genome = np.asarray([12.0, 20.0, 1.0, 20.0, 1.0, 0.0])
+    infeasible_genome = np.asarray([12.0, 20.0, 1.0, 20.0, 1.0, 1.0, 0.0])
 
     f_values, g_values = problem.evaluate(infeasible_genome, return_values_of=["F", "G"])
 
@@ -46,7 +46,7 @@ def test_problem_reports_graded_geometry_constraint_severity() -> None:
 
 def test_problem_accepts_feasible_genome() -> None:
     problem = DipoleOptimizationProblem(_topology(), _targets(), _feasibility())
-    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 0.0])
+    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0])
 
     f_values, g_values = problem.evaluate(feasible_genome, return_values_of=["F", "G"])
 
@@ -85,8 +85,8 @@ def test_problem_marks_operating_current_above_cap_as_graded_constraint_violatio
         _feasibility(),
         total_generations=10,
     )
-    barely_over_cap_genome = np.asarray([12.0, 10.0, 2.0, 45.0, 2.0, 0.0])
-    badly_over_cap_genome = np.asarray([12.0, 10.0, 1.0, 50.0, 1.0, 70.0])
+    barely_over_cap_genome = np.asarray([12.0, 10.0, 2.0, 45.0, 2.0, 1.0, 0.0])
+    badly_over_cap_genome = np.asarray([12.0, 10.0, 1.0, 50.0, 1.0, 1.0, 70.0])
     problem.set_generation(10)
 
     barely_over_f, barely_over_g = problem.evaluate(barely_over_cap_genome, return_values_of=["F", "G"])
@@ -108,7 +108,7 @@ def test_problem_computes_objectives_for_current_above_final_cap_within_annealed
         _feasibility(),
         total_generations=10,
     )
-    over_final_cap_genome = np.asarray([12.0, 10.0, 1.0, 40.0, 2.0, 30.0])
+    over_final_cap_genome = np.asarray([12.0, 10.0, 1.0, 40.0, 2.0, 1.0, 30.0])
     problem.set_generation(1)
 
     f_values, g_values = problem.evaluate(over_final_cap_genome, return_values_of=["F", "G"])
@@ -160,6 +160,44 @@ def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> No
     assert f_values[1] < 0.0
 
 
+def test_problem_reports_graded_turn_budget_constraints() -> None:
+    problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_total_turns=2, max_turns_per_layer=2),
+        _feasibility(),
+    )
+    barely_over_budget = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0, 1.0, 0.0])
+    badly_over_budget = np.asarray([12.0, 10.0, 2.0, 45.0, 2.0, 1.0, 0.0])
+
+    barely_f, barely_g = problem.evaluate(barely_over_budget, return_values_of=["F", "G"])
+    badly_f, badly_g = problem.evaluate(badly_over_budget, return_values_of=["F", "G"])
+
+    assert problem.n_ieq_constr == 3
+    assert barely_g[0] <= 0.0
+    assert badly_g[0] <= 0.0
+    assert barely_g[1] == 1.0
+    assert badly_g[1] == 2.0
+    assert barely_g[2] == 1.0
+    assert badly_g[2] == 2.0
+    assert barely_f[0] >= 1.0e12
+    assert badly_f[0] >= 1.0e12
+
+
+def test_problem_computes_objectives_for_designs_within_turn_budgets() -> None:
+    problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_total_turns=3, max_turns_per_layer=3),
+        _feasibility(),
+    )
+    within_budget = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0, 1.0, 0.0])
+
+    f_values, g_values = problem.evaluate(within_budget, return_values_of=["F", "G"])
+
+    assert np.all(g_values <= 0.0)
+    assert f_values[0] < 1.0e12
+    assert f_values[1] < 0.0
+
+
 def _topology() -> Topology:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return Topology(
@@ -183,6 +221,8 @@ def _targets(
     max_current_a: float | None = None,
     max_harmonic_units: float | None = None,
     min_margin_percent: float | None = None,
+    max_total_turns: int | None = None,
+    max_turns_per_layer: int | None = None,
 ) -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.02,
@@ -193,6 +233,8 @@ def _targets(
         max_harmonic_units=max_harmonic_units,
         min_margin_percent=min_margin_percent,
         max_current_a=max_current_a,
+        max_total_turns=max_total_turns,
+        max_turns_per_layer=max_turns_per_layer,
     )
 
 

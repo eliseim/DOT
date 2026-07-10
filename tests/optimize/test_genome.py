@@ -91,7 +91,7 @@ def test_encode_decode_round_trips_fixed_topology_variables() -> None:
     genome = encode(design)
     decoded = decode(genome, topology, topology.cables)
 
-    assert topology.n_var == 15
+    assert topology.n_var == 18
     assert genome.shape == (topology.n_var,)
     assert genome.tolist() == [
         12.0,
@@ -99,15 +99,18 @@ def test_encode_decode_round_trips_fixed_topology_variables() -> None:
         2.0,
         38.0,
         3.0,
+        1.0,
         22.5,
         24.0,
         20.0,
         1.0,
         40.0,
         2.0,
+        1.0,
         -3.5,
         55.0,
         4.0,
+        1.0,
         66.0,
     ]
     assert decoded.layers[0].inner_radius_mm == pytest.approx(12.0)
@@ -147,10 +150,43 @@ def test_first_block_alpha_is_not_a_genome_slot() -> None:
         cables={"inner": cable},
     )
 
-    decoded = decode([12.0, 12.0, 2.0, 38.0, 3.0, 45.0], topology, topology.cables)
+    decoded = decode([12.0, 12.0, 2.0, 38.0, 3.0, 1.0, 45.0], topology, topology.cables)
 
-    assert topology.n_var == 6
+    assert topology.n_var == 7
     assert [block.alpha_deg for block in decoded.layers[0].blocks] == [0.0, 45.0]
+
+
+def test_optional_block_active_genes_control_decoded_block_count() -> None:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(10.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-10.0, 70.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+
+    base = [12.0, 5.0, 1.0, 25.0, 2.0, 0.0, 10.0, 45.0, 3.0, 0.0, 20.0, 65.0, 4.0, 0.0, 30.0]
+    expected_phis = {
+        (0.0, 0.0, 0.0): [5.0],
+        (1.0, 0.0, 0.0): [5.0, 25.0],
+        (1.0, 1.0, 0.0): [5.0, 25.0, 45.0],
+        (1.0, 1.0, 1.0): [5.0, 25.0, 45.0, 65.0],
+    }
+    for active_values, phis in expected_phis.items():
+        genome = list(base)
+        genome[5], genome[9], genome[13] = active_values
+
+        decoded = decode(genome, topology, topology.cables)
+
+        assert [block.phi_deg for block in decoded.layers[0].blocks] == phis
 
 
 def test_genome_bounds_match_topology_order() -> None:
@@ -185,18 +221,21 @@ def test_genome_bounds_match_topology_order() -> None:
             10.0,
             5.0,
             1.0,
-            32.5,
+                32.5,
+                1.0,
+                0.0,
+                -10.0,
+                22.0,
+                15.0,
             1.0,
-            -10.0,
-            22.0,
-            15.0,
-            1.0,
-            36.66666666666667,
-            1.0,
-            -5.0,
-            58.333333333333336,
-            1.0,
-            -5.0,
+                36.66666666666667,
+                1.0,
+                0.0,
+                -5.0,
+                58.333333333333336,
+                1.0,
+                0.0,
+                -5.0,
         ]
     )
     assert upper.tolist() == pytest.approx(
@@ -204,18 +243,21 @@ def test_genome_bounds_match_topology_order() -> None:
             20.0,
             32.5,
             5.0,
-            60.0,
-            5.0,
-            70.0,
-            30.0,
-            36.66666666666667,
+                60.0,
+                5.0,
+                1.0,
+                70.0,
+                30.0,
+                36.66666666666667,
             6.0,
-            58.333333333333336,
-            6.0,
-            68.0,
-            80.0,
-            6.0,
-            68.0,
+                58.333333333333336,
+                6.0,
+                1.0,
+                68.0,
+                80.0,
+                6.0,
+                1.0,
+                68.0,
         ]
     )
 
@@ -237,7 +279,7 @@ def test_genome_bounds_partitions_four_block_phi_window() -> None:
 
     lower, upper = genome_bounds(topology)
 
-    phi_slots = [1, 3, 6, 9]
+    phi_slots = [1, 3, 7, 11]
     assert lower[phi_slots].tolist() == pytest.approx([2.0, 21.0, 40.0, 59.0])
     assert upper[phi_slots].tolist() == pytest.approx([21.0, 40.0, 59.0, 78.0])
 
@@ -280,18 +322,18 @@ def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -
         cables={"inner": cable},
     )
     old_lower = np.array(
-        [20.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0]
+        [20.0, 2.0, 1.0, 2.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 0.0]
     )
     old_upper = np.array(
-        [20.0, 78.0, 1.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0, 78.0, 1.0, 0.0]
+        [20.0, 78.0, 1.0, 78.0, 1.0, 1.0, 0.0, 78.0, 1.0, 1.0, 0.0, 78.0, 1.0, 1.0, 0.0]
     )
     new_lower, new_upper = genome_bounds(topology)
 
     old_feasible = _sample_feasible_count(topology, old_lower, old_upper)
     new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
 
-    assert old_feasible == 48
-    assert new_feasible == 139
+    assert old_feasible == 42
+    assert new_feasible == 177
     assert new_feasible >= old_feasible + 50
 
 

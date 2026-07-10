@@ -1,11 +1,12 @@
-"""Genome encoding for fixed-topology coil optimization.
+"""Genome encoding for fixed-maximum-topology coil optimization.
 
-The topology is fixed by the caller: layer count, block count per layer, and
-the cable assigned to each layer are not search variables.  The genome stores
-one continuous inner radius per layer and, per block, one continuous azimuthal
-angle plus one integer turn count.  The first block in each layer has
-``alpha_deg`` fixed to zero and no genome slot; later blocks also store one
-continuous ``alpha_deg`` value.
+The topology is fixed by the caller: layer count, maximum block count per layer,
+and the cable assigned to each layer are not search variables.  The genome
+stores one continuous inner radius per layer and, per block slot, one continuous
+azimuthal angle plus one integer turn count.  The first block in each layer is
+always active, has ``alpha_deg`` fixed to zero, and has no active or alpha genome
+slot; later block slots store an active/inactive gene and one continuous
+``alpha_deg`` value.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
-from pymoo.core.variable import Integer, Real
+from pymoo.core.variable import Binary, Integer, Real
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 
@@ -36,7 +37,7 @@ class GenomeVariable:
 
 @dataclass(frozen=True, slots=True)
 class LayerTopology:
-    """Fixed topology and variable bounds for one coil layer."""
+    """Maximum topology and variable bounds for one coil layer."""
 
     cable_id: str
     n_blocks: int
@@ -61,7 +62,7 @@ class LayerTopology:
 
 @dataclass(frozen=True, slots=True)
 class Topology:
-    """Fixed layer/block/cable topology plus global design constants."""
+    """Fixed layer/cable topology, maximum block counts, and design constants."""
 
     aperture_radius_mm: float
     layers: tuple[LayerTopology, ...]
@@ -74,20 +75,46 @@ class Topology:
 
     @property
     def n_var(self) -> int:
-        return sum(1 + 2 + 3 * (layer.n_blocks - 1) for layer in self.layers)
+        return sum(1 + 2 + 4 * (layer.n_blocks - 1) for layer in self.layers)
 
 
-def encode(design: DipoleDesign) -> np.ndarray:
-    """Encode a fixed-topology ``DipoleDesign`` into a flat genome array."""
+def encode(design: DipoleDesign, topology: Topology | None = None) -> np.ndarray:
+    """Encode a ``DipoleDesign`` into a flat genome array.
+
+    Without an explicit topology, every block present in the design is encoded
+    as active, preserving the pre-optional-block calling convention.  With a
+    topology, missing block slots are padded as inactive using that slot's lower
+    bounds for the ignored phi/turn/alpha genes.
+    """
 
     values: list[float] = []
-    for layer in design.layers:
+    if topology is not None and len(design.layers) != len(topology.layers):
+        raise ValueError("design layer count must match topology layer count")
+
+    for layer_index, layer in enumerate(design.layers):
+        layer_topology = None if topology is None else topology.layers[layer_index]
+        if layer_topology is not None and len(layer.blocks) > layer_topology.n_blocks:
+            raise ValueError("design has more blocks than topology maximum")
         values.append(layer.inner_radius_mm)
-        for block_index, block in enumerate(layer.blocks):
-            values.append(block.phi_deg)
-            values.append(float(block.n_turns))
+        max_blocks = len(layer.blocks) if layer_topology is None else layer_topology.n_blocks
+        for block_index in range(max_blocks):
+            if block_index < len(layer.blocks):
+                block = layer.blocks[block_index]
+                values.append(block.phi_deg)
+                values.append(float(block.n_turns))
+                if block_index > 0:
+                    values.append(1.0)
+                    values.append(block.alpha_deg)
+                continue
+            if layer_topology is None:
+                break
+            phi_lower, phi_upper = layer_topology.phi_bounds_deg
+            window_width = (phi_upper - phi_lower) / layer_topology.n_blocks
+            values.append(phi_lower + block_index * window_width)
+            values.append(float(layer_topology.n_turns_bounds[0]))
             if block_index > 0:
-                values.append(block.alpha_deg)
+                values.append(0.0)
+                values.append(layer_topology.alpha_bounds_deg[0])
     return np.asarray(values, dtype=float)
 
 
@@ -128,11 +155,18 @@ def decode(
             )
             index += 2
             if block_index == 0:
+                is_active = True
                 alpha_deg = 0.0
             else:
+                raw_active = values[index]
+                _require_finite(float(raw_active), "active")
+                is_active = bool(int(round(float(raw_active))))
+                index += 1
                 alpha_deg = float(values[index])
                 _require_finite(alpha_deg, "alpha_deg")
                 index += 1
+            if not is_active:
+                continue
             blocks.append(
                 Block(
                     phi_deg=phi_deg,
@@ -163,6 +197,8 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
             lower.extend((block_phi_lower, float(layer.n_turns_bounds[0])))
             upper.extend((block_phi_upper, float(layer.n_turns_bounds[1])))
             if block_index > 0:
+                lower.append(0.0)
+                upper.append(1.0)
                 lower.append(layer.alpha_bounds_deg[0])
                 upper.append(layer.alpha_bounds_deg[1])
     return np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
@@ -211,6 +247,17 @@ def genome_variables(topology: Topology) -> tuple[GenomeVariable, ...]:
             if block_index > 0:
                 variables.append(
                     GenomeVariable(
+                        name=f"layer_{layer_index}_block_{block_index}_active",
+                        index=index,
+                        kind="binary",
+                        bounds=(float(lower[index]), float(upper[index])),
+                        layer_index=layer_index,
+                        block_index=block_index,
+                    )
+                )
+                index += 1
+                variables.append(
+                    GenomeVariable(
                         name=f"layer_{layer_index}_block_{block_index}_alpha_deg",
                         index=index,
                         kind="real",
@@ -223,12 +270,14 @@ def genome_variables(topology: Topology) -> tuple[GenomeVariable, ...]:
     return tuple(variables)
 
 
-def mixed_variable_spec(topology: Topology) -> dict[str, Real | Integer]:
+def mixed_variable_spec(topology: Topology) -> dict[str, Real | Integer | Binary]:
     """Return pymoo mixed-variable declarations for this topology."""
 
-    variables: dict[str, Real | Integer] = {}
+    variables: dict[str, Real | Integer | Binary] = {}
     for variable in genome_variables(topology):
-        if variable.kind == "integer":
+        if variable.kind == "binary":
+            variables[variable.name] = Binary()
+        elif variable.kind == "integer":
             variables[variable.name] = Integer(
                 bounds=(int(variable.bounds[0]), int(variable.bounds[1]))
             )
