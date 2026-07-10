@@ -8,13 +8,18 @@ from pathlib import Path
 
 import pytest
 
+from dot.conductors.cadata import resolve_conductor
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
+from dot.optimize import LayerConductorData, load_line_margin_objective
+from dot.optimize.operating_point import operating_point
+from dot.optimize.objectives import _peak_field_on_own_turns
 from dot.physics import field_at, place_line_current_sources
 
 ROXIE_SERVICE_URL = os.environ.get("ROXIE_SERVICE_URL", "http://127.0.0.1:8080")
 ROXIE_TEMPLATE = Path("C:/Users/elisei/Desktop/dipole_designer/10042026_CTH-14T.data")
 ROXIE_CADATA = Path("C:/Users/elisei/Desktop/dipole_designer/roxie_CTH_cables.cadata")
 FIELD_TOLERANCE_REL = 0.02
+MARGIN_TOLERANCE_PERCENTAGE_POINTS = 2.0
 
 CURRENT_A = 12238.0
 CTH_HF = CableSpec(
@@ -64,6 +69,17 @@ class LiveComparison:
     relative_error: float
 
 
+@dataclass(frozen=True)
+class LiveMarginComparison:
+    case_name: str
+    dot_peak_t: float
+    roxie_peak_t: float
+    peak_relative_error: float
+    dot_margin_percent: float
+    roxie_margin_percent: float
+    margin_error_percentage_points: float
+
+
 def test_live_roxie_field_parity_cth14t(tmp_path: Path) -> None:
     _require_live_roxie()
 
@@ -108,6 +124,24 @@ def test_live_roxie_field_parity_alpha_zero_single_turn_cases(
     )
 
     assert comparison.relative_error < FIELD_TOLERANCE_REL
+
+
+def test_live_roxie_peak_field_and_margin_parity_cth_lf(tmp_path: Path) -> None:
+    _require_live_roxie()
+
+    comparisons = tuple(
+        _cth_lf_peak_and_margin_comparison(tmp_path, case_name, design)
+        for case_name, design in _cth_lf_margin_cases()
+    )
+
+    assert len(comparisons) == 5
+    assert any(sum(block.n_turns for layer in design.layers for block in layer.blocks) == 1 for _, design in _cth_lf_margin_cases())
+    assert any(len(design.layers) > 1 for _, design in _cth_lf_margin_cases())
+    assert all(comparison.peak_relative_error < FIELD_TOLERANCE_REL for comparison in comparisons)
+    assert all(
+        comparison.margin_error_percentage_points < MARGIN_TOLERANCE_PERCENTAGE_POINTS
+        for comparison in comparisons
+    )
 
 
 def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
@@ -188,6 +222,38 @@ def _alpha_zero_single_turn_design(
     return DipoleDesign(aperture_radius_mm=25.0, layers=(Layer(inner_radius_mm=inner_radius_mm, blocks=(block,)),))
 
 
+def _cth_lf_margin_cases() -> tuple[tuple[str, DipoleDesign], ...]:
+    return (
+        ("cth_lf_single_turn_diag_a", _cth_lf_design(((36.539, 27.667, 1),))),
+        ("cth_lf_two_layer_diag_b", _cth_lf_design(((38.657, 41.683, 1), (59.041, 46.598, 1)))),
+        ("cth_lf_single_turn_r34_phi36", _cth_lf_design(((34.0, 36.0, 1),))),
+        ("cth_lf_two_layer_single_turns", _cth_lf_design(((33.0, 30.0, 1), (55.0, 50.0, 1)))),
+        ("cth_lf_three_layer_single_turns", _cth_lf_design(((32.0, 42.0, 1), (53.0, 38.0, 1), (74.0, 48.0, 1)))),
+    )
+
+
+def _cth_lf_design(records: tuple[tuple[float, float, int], ...], current_a: float = 1.0) -> DipoleDesign:
+    return DipoleDesign(
+        aperture_radius_mm=25.0,
+        layers=tuple(
+            Layer(
+                inner_radius_mm=radius_mm,
+                blocks=(
+                    Block(
+                        phi_deg=phi_deg,
+                        alpha_deg=0.0,
+                        n_turns=n_turns,
+                        cable=CTH_LF,
+                        inner_radius_mm=radius_mm,
+                        current_a=current_a,
+                    ),
+                ),
+            )
+            for radius_mm, phi_deg, n_turns in records
+        ),
+    )
+
+
 def _alpha_zero_single_block_design(*, current_a: float) -> DipoleDesign:
     block = Block(
         phi_deg=45.0,
@@ -218,6 +284,65 @@ def _compare_with_roxie(
         dot_field_t=dot_field_t,
         roxie_field_t=roxie_field_t,
         relative_error=relative_error,
+    )
+
+
+def _cth_lf_peak_and_margin_comparison(
+    tmp_path: Path,
+    case_name: str,
+    unit_current_design: DipoleDesign,
+) -> LiveMarginComparison:
+    solved = operating_point(unit_current_design, 1.0)
+    records = tuple(_cth_lf_block_record(number, block) for number, block in enumerate(_all_blocks(solved.design), start=1))
+    data_file = _write_no_iron_data_file(tmp_path, case_name, records, r_ref_mm=25.0)
+    output_dir = tmp_path / f"{case_name}_output"
+    output_dir.mkdir()
+    output_file = _run_roxie_output(data_file, output_dir)
+    roxie_peak_t, roxie_loadline_percent = _parse_peak_and_loadline(output_file)
+    roxie_margin_percent = 100.0 - roxie_loadline_percent
+
+    cadata_text = ROXIE_CADATA.read_text(encoding="utf-8", errors="replace")
+    conductor = resolve_conductor(cadata_text, "CTH_LF")
+    if not conductor.is_resolved:
+        pytest.fail(f"CTH_LF conductor did not resolve: {conductor.status} {conductor.message}")
+    layer_data = LayerConductorData(
+        strand=conductor.strand,
+        cable=conductor.cable,
+        remfit=conductor.remfit,
+    )
+    cadata_by_layer = tuple(layer_data for _ in solved.design.layers)
+    dot_margin_percent = load_line_margin_objective(
+        solved.design,
+        cable_specs_by_layer=tuple(layer.blocks[0].cable for layer in solved.design.layers),
+        cadata_by_layer=cadata_by_layer,
+        temperature_k=conductor.temperature_k,
+    )
+    _, dot_peak_t = _peak_field_on_own_turns(solved.design, evaluated_layers=tuple(range(len(solved.design.layers))))
+    return LiveMarginComparison(
+        case_name=case_name,
+        dot_peak_t=dot_peak_t,
+        roxie_peak_t=roxie_peak_t,
+        peak_relative_error=abs(dot_peak_t - roxie_peak_t) / abs(roxie_peak_t),
+        dot_margin_percent=dot_margin_percent,
+        roxie_margin_percent=roxie_margin_percent,
+        margin_error_percentage_points=abs(dot_margin_percent - roxie_margin_percent),
+    )
+
+
+def _all_blocks(design: DipoleDesign) -> tuple[Block, ...]:
+    return tuple(block for layer in design.layers for block in layer.blocks)
+
+
+def _cth_lf_block_record(number: int, block: Block) -> RoxieBlockRecord:
+    return RoxieBlockRecord(
+        number=number,
+        n_turns=block.n_turns,
+        radius_mm=block.inner_radius_mm,
+        phi_roxie_deg=90.0 - block.phi_deg,
+        alpha_roxie_deg=-block.alpha_deg,
+        current_a=block.current_a,
+        conductor_name="CTH_LF",
+        n2=15,
     )
 
 
@@ -362,6 +487,10 @@ def _quoted_roxie_path(value: str) -> str:
 
 
 def _run_roxie_main_field(data_file: Path, output_dir: Path) -> float:
+    return _parse_main_field(_run_roxie_output(data_file, output_dir))
+
+
+def _run_roxie_output(data_file: Path, output_dir: Path) -> Path:
     try:
         from roxieapi.tool_adapter.RoxieToolAdapter import RestRoxieToolAdapter
     except Exception as exc:
@@ -379,7 +508,7 @@ def _run_roxie_main_field(data_file: Path, output_dir: Path) -> float:
     output_files = tuple(output_dir.glob("*.output"))
     if not output_files:
         pytest.fail("ROXIE REST run did not produce a .output artefact")
-    return _parse_main_field(output_files[0])
+    return output_files[0]
 
 
 def _parse_main_field(output_file: Path) -> float:
@@ -389,6 +518,24 @@ def _parse_main_field(output_file: Path) -> float:
     if not match:
         pytest.fail(f"could not parse MAIN FIELD from {output_file}")
     return abs(float(match.group(1)))
+
+
+def _parse_peak_and_loadline(output_file: Path) -> tuple[float, float]:
+    text = output_file.read_text(encoding="utf-8", errors="replace")
+    number_pattern = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)"
+    peaks = [
+        abs(float(match.group(1)))
+        for match in re.finditer(rf"PEAK FIELD IN CONDUCTOR\s+\d+\s*\(T\)\s*\.{{10,}}\s*{number_pattern}", text)
+    ]
+    loadlines = [
+        float(match.group(1))
+        for match in re.finditer(rf"PERCENTAGE ON THE LOAD LINE\s*\.{{10,}}\s*{number_pattern}", text)
+    ]
+    if not peaks:
+        pytest.fail(f"could not parse PEAK FIELD IN CONDUCTOR from {output_file}")
+    if not loadlines:
+        pytest.fail(f"could not parse PERCENTAGE ON THE LOAD LINE from {output_file}")
+    return max(peaks), max(loadlines)
 
 
 def _require_live_roxie() -> None:

@@ -8,7 +8,11 @@ from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
 from dot.conductors import load_line_margin_percent, solve_short_sample_current
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.optimize import LayerConductorData, field_quality_objective, load_line_margin_objective
-from dot.optimize.objectives import _peak_field_on_own_turns
+from dot.optimize.objectives import (
+    PEAK_FIELD_FILAMENTS_PER_AXIS,
+    _conductor_turns_by_layer,
+    _peak_field_on_own_turns,
+)
 from dot.physics import field_at, multipole_coefficients, place_line_current_sources
 
 
@@ -80,6 +84,16 @@ def test_load_line_margin_requires_at_least_one_supported_layer() -> None:
         )
 
 
+def test_peak_field_uses_bare_conductor_geometry_not_insulation_boundary() -> None:
+    insulated_design = _keystoned_design(current_a=120.0)
+    bare_design = _keystoned_design(current_a=120.0, insulation_mm=0.0)
+
+    _, insulated_peak_t = _peak_field_on_own_turns(insulated_design)
+    _, bare_peak_t = _peak_field_on_own_turns(bare_design)
+
+    assert insulated_peak_t == pytest.approx(bare_peak_t)
+
+
 def _asymmetric_design(*, current_a: float) -> DipoleDesign:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return DipoleDesign(
@@ -145,19 +159,44 @@ def _two_layer_design(*, current_a: float) -> DipoleDesign:
     )
 
 
+def _keystoned_design(*, current_a: float, insulation_mm: float = 0.5) -> DipoleDesign:
+    cable = CableSpec(
+        width_inner_mm=2.0,
+        width_outer_mm=4.0,
+        height_mm=2.0,
+        insulation_thickness_mm=insulation_mm,
+    )
+    block = Block(
+        phi_deg=0.0,
+        alpha_deg=0.0,
+        n_turns=1,
+        cable=cable,
+        inner_radius_mm=10.0,
+        current_a=current_a,
+    )
+    return DipoleDesign(aperture_radius_mm=5.0, layers=(Layer(inner_radius_mm=10.0, blocks=(block,)),))
+
+
 def _direct_peak_field_layer_and_value(design: DipoleDesign) -> tuple[int, float]:
-    sources = tuple(source for turn in design.all_turns() for source in place_line_current_sources(turn))
+    indexed_turns = _conductor_turns_by_layer(design)
+    sources = tuple(
+        source
+        for indexed in indexed_turns
+        for source in place_line_current_sources(
+            indexed.turn,
+            n1=PEAK_FIELD_FILAMENTS_PER_AXIS,
+            n2=PEAK_FIELD_FILAMENTS_PER_AXIS,
+        )
+    )
     best_layer = -1
     best_field = -math.inf
-    for layer_index, layer in enumerate(design.layers):
-        for block in layer.blocks:
-            for turn in block.turns():
-                for x_mm, y_mm in _sample_points(turn.corners):
-                    bx_t, by_t = field_at(sources, x_mm, y_mm)
-                    magnitude = math.hypot(bx_t, by_t)
-                    if magnitude > best_field:
-                        best_layer = layer_index
-                        best_field = magnitude
+    for indexed in indexed_turns:
+        for x_mm, y_mm in _sample_points(indexed.turn.corners):
+            bx_t, by_t = field_at(sources, x_mm, y_mm)
+            magnitude = math.hypot(bx_t, by_t)
+            if magnitude > best_field:
+                best_layer = indexed.layer_index
+                best_field = magnitude
     return best_layer, best_field
 
 
@@ -181,6 +220,6 @@ def conductor_data() -> LayerConductorData:
         c4=1.0,
         c5=1.0,
         c6=1.0,
-        c7=10.0,
+        c7=20.1,
     )
     return LayerConductorData(strand=strand, cable=cable, remfit=remfit)
