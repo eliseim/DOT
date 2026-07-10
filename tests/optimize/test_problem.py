@@ -182,6 +182,13 @@ def test_problem_reports_graded_turn_budget_constraints() -> None:
     assert barely_f[0] >= 1.0e12
     assert badly_f[0] >= 1.0e12
 
+    # Verification that inactive block slot's turns are not counted towards budgets
+    inactive_but_high_turns = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0, 0.0, 0.0])
+    inactive_f, inactive_g = problem.evaluate(inactive_but_high_turns, return_values_of=["F", "G"])
+    assert inactive_g[1] == 0.0
+    assert inactive_g[2] == 0.0
+    assert inactive_f[0] < 1.0e12
+
 
 def test_problem_computes_objectives_for_designs_within_turn_budgets() -> None:
     problem = DipoleOptimizationProblem(
