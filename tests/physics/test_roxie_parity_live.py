@@ -134,8 +134,9 @@ def test_live_roxie_peak_field_and_margin_parity_cth_lf(tmp_path: Path) -> None:
         for case_name, design in _cth_lf_margin_cases()
     )
 
-    assert len(comparisons) == 5
+    assert len(comparisons) == 7
     assert any(sum(block.n_turns for layer in design.layers for block in layer.blocks) == 1 for _, design in _cth_lf_margin_cases())
+    assert any(sum(block.n_turns for layer in design.layers for block in layer.blocks) > 1 for _, design in _cth_lf_margin_cases())
     assert any(len(design.layers) > 1 for _, design in _cth_lf_margin_cases())
     assert all(comparison.peak_relative_error < FIELD_TOLERANCE_REL for comparison in comparisons)
     assert all(
@@ -227,6 +228,8 @@ def _cth_lf_margin_cases() -> tuple[tuple[str, DipoleDesign], ...]:
         ("cth_lf_single_turn_diag_a", _cth_lf_design(((36.539, 27.667, 1),))),
         ("cth_lf_two_layer_diag_b", _cth_lf_design(((38.657, 41.683, 1), (59.041, 46.598, 1)))),
         ("cth_lf_single_turn_r34_phi36", _cth_lf_design(((34.0, 36.0, 1),))),
+        ("cth_lf_custom_two_turns_block", _cth_lf_design(((35.0, 35.0, 2),))),
+        ("cth_lf_three_turn_r42_phi48", _cth_lf_design(((42.0, 48.0, 3),))),
         ("cth_lf_two_layer_single_turns", _cth_lf_design(((33.0, 30.0, 1), (55.0, 50.0, 1)))),
         ("cth_lf_three_layer_single_turns", _cth_lf_design(((32.0, 42.0, 1), (53.0, 38.0, 1), (74.0, 48.0, 1)))),
     )

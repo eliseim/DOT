@@ -111,8 +111,10 @@ def test_block_layer_and_design_flatten_azimuthally_wound_turns() -> None:
     assert len(turns) == 2
     assert turns[0].corners[0] == pytest.approx((10.0, -2.5))
     assert turns[0].corners[2] == pytest.approx((13.0, 2.5))
-    expected_phi = 90.0 - math.degrees(cable.insulated_width_inner_mm / 10.0)
-    expected_anchor = (10.0 * math.sin(math.radians(expected_phi)), 10.0 * math.cos(math.radians(expected_phi)))
+    expected_anchor = (
+        math.sqrt(10.0 * 10.0 - cable.insulated_width_inner_mm * cable.insulated_width_inner_mm),
+        cable.insulated_width_inner_mm,
+    )
     assert turns[1].corners[0] == pytest.approx(
         (
             expected_anchor[0],
@@ -127,8 +129,8 @@ def test_block_layer_and_design_flatten_azimuthally_wound_turns() -> None:
     )
 
 
-def test_block_turns_step_phi_toward_pole_by_insulated_width_at_constant_radius() -> None:
-    cable = CableSpec(width_inner_mm=10.0, width_outer_mm=20.0, height_mm=2.0)
+def test_block_turns_project_width_step_onto_local_arc_tangent() -> None:
+    cable = CableSpec(width_mm=10.0, height_mm=2.0)
     block = Block(
         phi_deg=60.0,
         alpha_deg=0.0,
@@ -140,19 +142,91 @@ def test_block_turns_step_phi_toward_pole_by_insulated_width_at_constant_radius(
 
     turns = block.turns()
 
-    anchors = tuple(turn.corners[0] for turn in turns)
+    anchors = tuple(
+        (
+            0.5 * (turn.corners[0][0] + turn.corners[1][0]),
+            0.5 * (turn.corners[0][1] + turn.corners[1][1]),
+        )
+        for turn in turns
+    )
     phis = tuple(math.degrees(math.atan2(anchor[0], anchor[1])) for anchor in anchors)
     radii = tuple(math.hypot(*anchor) for anchor in anchors)
-    expected_step = math.degrees(cable.insulated_width_inner_mm / block.inner_radius_mm)
+    expected_phi_1 = math.degrees(
+        math.acos(
+            (
+                block.inner_radius_mm * math.cos(math.radians(block.phi_deg))
+                + cable.insulated_width_inner_mm
+            )
+            / block.inner_radius_mm
+        )
+    )
+    expected_phi_2 = math.degrees(
+        math.acos(
+            (
+                block.inner_radius_mm * math.cos(math.radians(expected_phi_1))
+                + cable.insulated_width_inner_mm
+            )
+            / block.inner_radius_mm
+        )
+    )
 
     assert phis == pytest.approx(
         (
             60.0,
-            60.0 - expected_step,
-            60.0 - 2.0 * expected_step,
+            expected_phi_1,
+            expected_phi_2,
         )
     )
     assert radii == pytest.approx((100.0, 100.0, 100.0))
+
+
+def test_block_turns_match_cth_lf_multiturn_arc_projection_and_keystone_tilt() -> None:
+    cable = CableSpec(
+        width_inner_mm=1.736,
+        width_outer_mm=2.084,
+        height_mm=16.17,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    block = Block(
+        phi_deg=35.0,
+        alpha_deg=0.0,
+        n_turns=2,
+        cable=cable,
+        inner_radius_mm=35.0,
+        current_a=1000.0,
+    )
+
+    turns = block.turns()
+
+    anchors = tuple(turn.corners[0] for turn in turns)
+    phis = tuple(math.degrees(math.atan2(anchor[0], anchor[1])) for anchor in anchors)
+    wrong_step = math.degrees(cable.insulated_width_inner_mm / block.inner_radius_mm)
+    projected_step = phis[0] - phis[1]
+    expected_projected_step = math.degrees(
+        math.acos(
+            (
+                block.inner_radius_mm * math.cos(math.radians(block.phi_deg))
+                + cable.insulated_width_inner_mm
+            )
+            / block.inner_radius_mm
+        )
+    )
+    keystone_deg = math.degrees(
+        math.atan2(
+            cable.insulated_width_outer_mm - cable.insulated_width_inner_mm,
+            cable.insulated_height_mm,
+        )
+    )
+    second_height_axis = (
+        (turns[1].corners[3][0] - turns[1].corners[0][0]) / cable.insulated_height_mm,
+        (turns[1].corners[3][1] - turns[1].corners[0][1]) / cable.insulated_height_mm,
+    )
+
+    assert wrong_step == pytest.approx(3.316607122671565)
+    assert projected_step == pytest.approx(35.0 - expected_projected_step)
+    assert projected_step == pytest.approx(6.287068778190076)
+    assert second_height_axis == pytest.approx((math.cos(math.radians(keystone_deg)), math.sin(math.radians(keystone_deg))))
 
 
 def test_block_turns_keep_radius_when_width_stack_reaches_pole() -> None:

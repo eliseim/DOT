@@ -127,37 +127,26 @@ class Block:
             self.inner_radius_mm * math.sin(phi),
             self.inner_radius_mm * math.cos(phi),
         )
-        height_axis, width_axis = _turn_axes(math.radians(self.alpha_deg))
-        final_width_coordinate = _dot(turn_0_anchor, width_axis) + (
-            (self.n_turns - 1) * self.cable.insulated_width_inner_mm
-        )
-        if abs(final_width_coordinate) <= self.inner_radius_mm:
-            delta_phi_deg = math.degrees(self.cable.insulated_width_inner_mm / self.inner_radius_mm)
-            return tuple(
-                TurnPolygon.from_parameters(
+        anchors = [turn_0_anchor]
+        for index in range(1, self.n_turns):
+            _, width_axis = _turn_axes(math.radians(_turn_alpha_deg(self.alpha_deg, self.cable, index - 1)))
+            anchors.append(
+                _arc_stacked_anchor(
+                    previous_anchor=anchors[-1],
+                    width_axis=width_axis,
                     inner_radius_mm=self.inner_radius_mm,
-                    phi_deg=self.phi_deg - index * delta_phi_deg,
-                    alpha_deg=self.alpha_deg,
-                    cable=self.cable,
-                    current_a=self.current_a,
+                    width_offset_mm=self.cable.insulated_width_inner_mm,
                 )
-                for index in range(self.n_turns)
             )
 
         return tuple(
             TurnPolygon.from_anchor(
-                anchor=_arc_stacked_anchor(
-                    turn_0_anchor=turn_0_anchor,
-                    height_axis=height_axis,
-                    width_axis=width_axis,
-                    inner_radius_mm=self.inner_radius_mm,
-                    width_offset_mm=index * self.cable.insulated_width_inner_mm,
-                ),
-                alpha_deg=self.alpha_deg,
+                anchor=anchor,
+                alpha_deg=_turn_alpha_deg(self.alpha_deg, self.cable, index),
                 cable=self.cable,
                 current_a=self.current_a,
             )
-            for index in range(self.n_turns)
+            for index, anchor in enumerate(anchors)
         )
 
 
@@ -189,17 +178,30 @@ def _turn_axes(alpha_rad: float) -> tuple[Point, Point]:
     return height_axis, width_axis
 
 
+def _turn_alpha_deg(block_alpha_deg: float, cable: CableSpec, turn_index: int) -> float:
+    return block_alpha_deg - turn_index * _keystone_angle_deg(cable)
+
+
+def _keystone_angle_deg(cable: CableSpec) -> float:
+    return math.degrees(
+        math.atan2(
+            cable.insulated_width_outer_mm - cable.insulated_width_inner_mm,
+            cable.insulated_height_mm,
+        )
+    )
+
+
 def _arc_stacked_anchor(
     *,
-    turn_0_anchor: Point,
-    height_axis: Point,
+    previous_anchor: Point,
     width_axis: Point,
     inner_radius_mm: float,
     width_offset_mm: float,
 ) -> Point:
-    width_coordinate = _dot(turn_0_anchor, width_axis) + width_offset_mm
+    height_axis = (width_axis[1], -width_axis[0])
+    width_coordinate = _dot(previous_anchor, width_axis) + width_offset_mm
     width_coordinate = _clamp(width_coordinate, -inner_radius_mm, inner_radius_mm)
-    height_coordinate_0 = _dot(turn_0_anchor, height_axis)
+    height_coordinate_0 = _dot(previous_anchor, height_axis)
     height_sign = 1.0 if height_coordinate_0 >= 0.0 else -1.0
     height_coordinate = height_sign * math.sqrt(
         max(0.0, inner_radius_mm * inner_radius_mm - width_coordinate * width_coordinate)
