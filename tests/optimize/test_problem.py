@@ -56,7 +56,7 @@ def test_problem_accepts_feasible_genome() -> None:
 
 
 def test_problem_anneals_target_admission_thresholds_to_final_targets() -> None:
-    targets = _targets(max_harmonic_units=10.0, min_margin_percent=15.0)
+    targets = _targets(max_harmonic_units=10.0, min_margin_percent=15.0, max_current_a=13000.0)
     problem = DipoleOptimizationProblem(
         _topology(),
         targets,
@@ -64,33 +64,59 @@ def test_problem_anneals_target_admission_thresholds_to_final_targets() -> None:
         total_generations=10,
     )
 
-    early_harmonic, early_margin = problem.admission_thresholds(generation=1)
-    late_harmonic, late_margin = problem.admission_thresholds(generation=10)
+    early_harmonic, early_margin, early_current = problem.admission_thresholds(generation=1)
+    late_harmonic, late_margin, late_current = problem.admission_thresholds(generation=10)
 
     assert early_harmonic is not None
     assert early_margin is not None
+    assert early_current is not None
     assert early_harmonic > targets.max_harmonic_units
     assert early_margin < targets.min_margin_percent
+    assert early_current > targets.max_current_a
     assert late_harmonic == targets.max_harmonic_units
     assert late_margin == targets.min_margin_percent
+    assert late_current == targets.max_current_a
 
 
-def test_problem_marks_operating_current_above_cap_as_constraint_violation() -> None:
+def test_problem_marks_operating_current_above_cap_as_graded_constraint_violation() -> None:
     problem = DipoleOptimizationProblem(
         _topology(),
-        _targets(max_current_a=200.0),
+        _targets(max_current_a=180.0),
         _feasibility(),
+        total_generations=10,
     )
-    over_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 0.0])
-    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 40.0, 2.0, 30.0])
+    barely_over_cap_genome = np.asarray([12.0, 10.0, 2.0, 45.0, 2.0, 0.0])
+    badly_over_cap_genome = np.asarray([12.0, 10.0, 1.0, 50.0, 1.0, 70.0])
+    problem.set_generation(10)
 
-    over_f, over_g = problem.evaluate(over_cap_genome, return_values_of=["F", "G"])
-    under_f, under_g = problem.evaluate(under_cap_genome, return_values_of=["F", "G"])
+    barely_over_f, barely_over_g = problem.evaluate(barely_over_cap_genome, return_values_of=["F", "G"])
+    badly_over_f, badly_over_g = problem.evaluate(badly_over_cap_genome, return_values_of=["F", "G"])
 
-    assert over_g[0] > 0.0
-    assert over_f[0] >= 1.0e12
-    assert under_g[0] <= 0.0
-    assert under_f[0] < 1.0e12
+    assert problem.n_ieq_constr == 2
+    assert barely_over_g[0] <= 0.0
+    assert badly_over_g[0] <= 0.0
+    assert barely_over_g[1] > 0.0
+    assert badly_over_g[1] > barely_over_g[1]
+    assert barely_over_f[0] < 1.0e12
+    assert badly_over_f[0] < 1.0e12
+
+
+def test_problem_computes_objectives_for_current_above_final_cap_within_annealed_threshold() -> None:
+    problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_current_a=180.0),
+        _feasibility(),
+        total_generations=10,
+    )
+    over_final_cap_genome = np.asarray([12.0, 10.0, 1.0, 40.0, 2.0, 30.0])
+    problem.set_generation(1)
+
+    f_values, g_values = problem.evaluate(over_final_cap_genome, return_values_of=["F", "G"])
+
+    assert g_values[0] <= 0.0
+    assert g_values[1] <= 0.0
+    assert f_values[0] < 1.0e12
+    assert f_values[1] < 0.0
 
 
 def test_problem_accepts_feasible_genome_with_unsupported_layer_excluded() -> None:
