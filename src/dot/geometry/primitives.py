@@ -185,8 +185,8 @@ def _turn_alpha_deg(block_alpha_deg: float, cable: CableSpec, turn_index: int) -
 def _keystone_angle_deg(cable: CableSpec) -> float:
     return math.degrees(
         math.atan2(
-            cable.insulated_width_outer_mm - cable.insulated_width_inner_mm,
-            cable.insulated_height_mm,
+            cable.width_outer_mm - cable.width_inner_mm,
+            cable.height_mm,
         )
     )
 

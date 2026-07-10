@@ -214,8 +214,8 @@ def test_block_turns_match_cth_lf_multiturn_arc_projection_and_keystone_tilt() -
     )
     keystone_deg = math.degrees(
         math.atan2(
-            cable.insulated_width_outer_mm - cable.insulated_width_inner_mm,
-            cable.insulated_height_mm,
+            cable.width_outer_mm - cable.width_inner_mm,
+            cable.height_mm,
         )
     )
     second_height_axis = (
