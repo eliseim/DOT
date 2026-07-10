@@ -15,10 +15,17 @@ _EPSILON = 1e-9
 
 @dataclass(frozen=True, slots=True)
 class Violation:
-    """One structured geometry constraint violation."""
+    """One structured geometry constraint violation.
+
+    ``severity`` is the positive amount past the constraint boundary in the
+    constraint's native unit: millimeters for clearance/overlap constraints
+    and degrees for angular constraints. Satisfied constraints still do not
+    emit a violation.
+    """
 
     constraint_name: str
     message: str
+    severity: float = 0.0
     layer_index: int | None = None
     block_index: int | None = None
     turn_index: int | None = None
@@ -60,6 +67,7 @@ def check_aperture_clearance(
                         "Turn intrudes into the circular aperture: "
                         f"clearance {clearance:.6g} mm < 0 mm."
                     ),
+                    severity=-clearance,
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
                     turn_index=indexed.turn_index,
@@ -103,6 +111,7 @@ def check_inter_layer_spacing(
                         f"{required_radius:.6g} mm after layer "
                         f"{inner_layer_index}."
                     ),
+                    severity=required_radius - outer_inner_radius,
                     layer_index=outer_layer_index,
                     other_layer_index=inner_layer_index,
                 )
@@ -127,6 +136,7 @@ def check_midplane_clearance(
                         f"Turn one-sided midplane clearance {min_y:.6g} mm "
                         f"is below required {min_gap_mm:.6g} mm."
                     ),
+                    severity=min_gap_mm - min_y,
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
                     turn_index=indexed.turn_index,
@@ -143,6 +153,7 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
     for left_index, left in enumerate(turns):
         for right in turns[left_index + 1 :]:
             if _convex_polygons_overlap(left.turn.corners, right.turn.corners):
+                overlap_depth = _convex_polygon_overlap_depth(left.turn.corners, right.turn.corners)
                 violations.append(
                     Violation(
                         constraint_name="turn_non_intersection",
@@ -151,6 +162,7 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
                             f"L{left.layer_index}/B{left.block_index}/T{left.turn_index} "
                             f"with L{right.layer_index}/B{right.block_index}/T{right.turn_index}."
                         ),
+                        severity=overlap_depth,
                         layer_index=left.layer_index,
                         block_index=left.block_index,
                         turn_index=left.turn_index,
@@ -182,6 +194,7 @@ def check_pole_angle_limit(
                         f"Turn outer edge angle {max_outer_angle:.6g} deg "
                         f"exceeds limit {layer_limit:.6g} deg."
                     ),
+                    severity=max_outer_angle - layer_limit,
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
                     turn_index=indexed.turn_index,
@@ -270,6 +283,15 @@ def _convex_polygons_overlap(left: tuple[Point, ...], right: tuple[Point, ...]) 
         if min(left_max, right_max) - max(left_min, right_min) <= _EPSILON:
             return False
     return True
+
+
+def _convex_polygon_overlap_depth(left: tuple[Point, ...], right: tuple[Point, ...]) -> float:
+    depths = []
+    for axis in (*_edge_normals(left), *_edge_normals(right)):
+        left_min, left_max = _project_onto_axis(left, axis)
+        right_min, right_max = _project_onto_axis(right, axis)
+        depths.append(min(left_max, right_max) - max(left_min, right_min))
+    return max(0.0, min(depths)) if depths else 0.0
 
 
 def _edge_normals(points: tuple[Point, ...]) -> Iterator[Point]:

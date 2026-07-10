@@ -16,6 +16,8 @@ from .objectives import LayerConductorData, field_quality_objective, load_line_m
 from .operating_point import operating_point
 
 _PENALTY = 1.0e12
+_START_HARMONIC_RELAXATION_MULTIPLIER = 10.0
+_START_MARGIN_RELAXATION_PERCENT = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,20 +61,44 @@ class DipoleOptimizationProblem(Problem):
         targets: OptimizationTargets,
         feasibility: FeasibilitySettings,
         cable_map: Mapping[str, CableSpec] | None = None,
+        total_generations: int = 1,
     ) -> None:
         self.topology = topology
         self.targets = targets
         self.feasibility = feasibility
         self.cable_map = topology.cables if cable_map is None else cable_map
+        self.total_generations = max(1, int(total_generations))
+        self.current_generation = 1
         lower, upper = genome_bounds(topology)
         super().__init__(
             n_var=topology.n_var,
             n_obj=2,
-            n_ieq_constr=1,
+            n_ieq_constr=1 + int(targets.max_harmonic_units is not None) + int(targets.min_margin_percent is not None),
             xl=lower,
             xu=upper,
             vars=mixed_variable_spec(topology),
         )
+
+    def set_generation(self, generation: int) -> None:
+        """Set the 1-indexed generation used by annealed target admission."""
+
+        self.current_generation = max(1, int(generation))
+
+    def admission_thresholds(self, generation: int | None = None) -> tuple[float | None, float | None]:
+        """Return active harmonic-units and margin-percent thresholds."""
+
+        if generation is None:
+            generation = self.current_generation
+        progress = min(1.0, max(1, int(generation)) / self.total_generations)
+        harmonic_threshold = None
+        if self.targets.max_harmonic_units is not None:
+            start = self.targets.max_harmonic_units * _START_HARMONIC_RELAXATION_MULTIPLIER
+            harmonic_threshold = start + progress * (self.targets.max_harmonic_units - start)
+        margin_threshold = None
+        if self.targets.min_margin_percent is not None:
+            start = self.targets.min_margin_percent - _START_MARGIN_RELAXATION_PERCENT
+            margin_threshold = start + progress * (self.targets.min_margin_percent - start)
+        return harmonic_threshold, margin_threshold
 
     def _evaluate(self, x, out, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
         if isinstance(x, dict):
@@ -90,7 +116,8 @@ class DipoleOptimizationProblem(Problem):
         else:
             rows = np.atleast_2d(np.asarray(x, dtype=float))
         objectives = np.empty((rows.shape[0], 2), dtype=float)
-        constraints = np.empty((rows.shape[0], 1), dtype=float)
+        constraints = np.zeros((rows.shape[0], self.n_ieq_constr), dtype=float)
+        harmonic_threshold_units, margin_threshold_percent = self.admission_thresholds()
 
         for row_index, row in enumerate(rows):
             try:
@@ -104,7 +131,7 @@ class DipoleOptimizationProblem(Problem):
                 )
                 if not feasibility.is_feasible:
                     objectives[row_index] = (_PENALTY, _PENALTY)
-                    constraints[row_index, 0] = float(len(feasibility.violations))
+                    constraints[row_index, 0] = sum(violation.severity for violation in feasibility.violations)
                     continue
 
                 solved = operating_point(unit_design, self.targets.target_bore_field_t)
@@ -128,7 +155,16 @@ class DipoleOptimizationProblem(Problem):
                     self.targets.temperature_k,
                 )
                 objectives[row_index] = (field_quality, -margin_percent)
-                constraints[row_index, 0] = 0.0
+                target_constraint_index = 1
+                if harmonic_threshold_units is not None:
+                    harmonic_threshold = harmonic_threshold_units / 1.0e4
+                    constraints[row_index, target_constraint_index] = max(0.0, field_quality - harmonic_threshold)
+                    target_constraint_index += 1
+                if margin_threshold_percent is not None:
+                    constraints[row_index, target_constraint_index] = max(
+                        0.0,
+                        margin_threshold_percent - margin_percent,
+                    )
             except (KeyError, ValueError, ZeroDivisionError):
                 objectives[row_index] = (_PENALTY, _PENALTY)
                 constraints[row_index, 0] = 1.0
