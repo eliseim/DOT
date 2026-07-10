@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
+from pymoo.core.population import Population
 
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
 from dot.geometry import CableSpec
+from dot.geometry.constraints import check_feasibility
 from dot.optimize import (
     LayerConductorData,
     LayerTopology,
     Topology,
+    decode,
     field_quality_objective,
+    genome_bounds,
     load_line_margin_objective,
 )
 from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
-from dot.optimize.runner import run_campaign
+from dot.optimize.runner import (
+    ConstructiveMixedVariableSampling,
+    PhiOrderingRepair,
+    _mixed_variable_nsga2,
+    _minimum_phi_gap_deg,
+    run_campaign,
+)
 
 
 def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -> None:
@@ -79,6 +90,117 @@ def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
     ]
 
 
+def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    lower, upper = genome_bounds(topology)
+    rng = np.random.default_rng(13)
+    random_genomes = rng.uniform(lower, upper, size=(200, topology.n_var))
+    problem = _problem_for(topology, feasibility)
+    constructive = ConstructiveMixedVariableSampling(topology, feasibility).do(
+        problem,
+        200,
+        random_state=np.random.default_rng(13),
+    )
+    constructive_genomes = np.asarray(
+        [candidate.X if not isinstance(candidate.X, dict) else _flatten(candidate.X, topology) for candidate in constructive],
+        dtype=float,
+    )
+
+    random_feasible = _feasible_count(topology, feasibility, random_genomes)
+    constructive_feasible = _feasible_count(topology, feasibility, constructive_genomes)
+
+    assert random_feasible == 139
+    assert constructive_feasible == 200
+    assert constructive_feasible > random_feasible
+
+
+def test_mixed_variable_sampling_and_mating_keep_turn_genes_integer() -> None:
+    topology = _integer_topology()
+    feasibility = _feasibility()
+    problem = _problem_for(topology, feasibility)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size=8)
+    sampled = algorithm.initialization.sampling.do(
+        problem,
+        8,
+        random_state=np.random.default_rng(3),
+    )
+    turn_names = [
+        name for name, variable in problem.vars.items() if variable.__class__.__name__ == "Integer"
+    ]
+    for candidate in sampled:
+        assert all(float(candidate.X[name]).is_integer() for name in turn_names)
+
+    parent_x = [candidate.X for candidate in sampled]
+    for index, genome in enumerate(parent_x):
+        genome = dict(genome)
+        for name in turn_names:
+            genome[name] = 1 if index % 2 == 0 else 5
+        parent_x[index] = genome
+    parents = Population.new(X=parent_x)
+    offspring = algorithm.mating.do(
+        problem,
+        parents,
+        12,
+        random_state=np.random.default_rng(5),
+    )
+
+    assert any(
+        any(float(child.X[name]) not in {1.0, 5.0} for name in turn_names)
+        for child in offspring
+    )
+    for child in offspring:
+        assert all(float(child.X[name]).is_integer() for name in turn_names)
+
+
+def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 74.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 55.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 32.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 8.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+
+    repaired = PhiOrderingRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
+    phis = [float(repaired[f"layer_0_block_{index}_phi_deg"]) for index in range(4)]
+    min_gap = _minimum_phi_gap_deg(
+        20.0,
+        topology.cables["inner"].insulated_width_inner_mm,
+        feasibility.min_gap_mm,
+    )
+
+    assert phis == sorted(phis)
+    assert all(right - left >= min_gap - 1.0e-12 for left, right in zip(phis, phis[1:], strict=False))
+    assert all(
+        topology.layers[0].phi_bounds_deg[0] <= phi <= topology.layers[0].phi_bounds_deg[1]
+        for phi in phis
+    )
+
+
 def _topology() -> Topology:
     cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
     return Topology(
@@ -117,6 +239,42 @@ def _four_layer_topology() -> Topology:
     )
 
 
+def _integer_topology() -> Topology:
+    cable = CableSpec(width_mm=0.2, height_mm=0.2, insulation_thickness_mm=0.0)
+    return Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=2,
+                inner_radius_bounds_mm=(20.0, 22.0),
+                phi_bounds_deg=(10.0, 70.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-10.0, 20.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+
+
+def _tight_four_block_topology() -> Topology:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    return Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+
+
 def _targets() -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.01,
@@ -129,6 +287,43 @@ def _targets() -> OptimizationTargets:
 
 def _feasibility() -> FeasibilitySettings:
     return FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=80.0)
+
+
+def _problem_for(topology: Topology, feasibility: FeasibilitySettings):
+    from dot.optimize.problem import DipoleOptimizationProblem
+
+    cadata_by_layer = tuple(conductor_data() for _ in topology.layers)
+    targets = OptimizationTargets(
+        target_bore_field_t=0.01,
+        r_ref_mm=5.0,
+        max_order=4,
+        cadata_by_layer=cadata_by_layer,
+        temperature_k=0.0,
+    )
+    return DipoleOptimizationProblem(topology, targets, feasibility)
+
+
+def _flatten(genome: dict[str, float | int], topology: Topology) -> np.ndarray:
+    from dot.optimize.genome import flatten_mixed_genome
+
+    return flatten_mixed_genome(genome, topology)
+
+
+def _feasible_count(
+    topology: Topology,
+    feasibility: FeasibilitySettings,
+    genomes: np.ndarray,
+) -> int:
+    feasible = 0
+    for genome in genomes:
+        result = check_feasibility(
+            decode(genome, topology, topology.cables),
+            aperture_radius_mm=topology.aperture_radius_mm,
+            min_gap_mm=feasibility.min_gap_mm,
+            max_angle_deg=feasibility.max_angle_deg,
+        )
+        feasible += int(result.is_feasible)
+    return feasible
 
 
 def conductor_data() -> LayerConductorData:

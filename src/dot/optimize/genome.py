@@ -15,10 +15,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
+from pymoo.core.variable import Integer, Real
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 
 DEFAULT_ALPHA_BOUNDS_DEG = (-10.0, 70.0)
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeVariable:
+    """Metadata for one flat genome slot."""
+
+    name: str
+    index: int
+    kind: str
+    bounds: tuple[float, float]
+    layer_index: int
+    block_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +166,87 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
                 lower.append(layer.alpha_bounds_deg[0])
                 upper.append(layer.alpha_bounds_deg[1])
     return np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+
+
+def genome_variables(topology: Topology) -> tuple[GenomeVariable, ...]:
+    """Return ordered metadata for every flat genome slot."""
+
+    lower, upper = genome_bounds(topology)
+    variables: list[GenomeVariable] = []
+    index = 0
+    for layer_index, layer in enumerate(topology.layers):
+        variables.append(
+            GenomeVariable(
+                name=f"layer_{layer_index}_inner_radius_mm",
+                index=index,
+                kind="real",
+                bounds=(float(lower[index]), float(upper[index])),
+                layer_index=layer_index,
+            )
+        )
+        index += 1
+        for block_index in range(layer.n_blocks):
+            variables.append(
+                GenomeVariable(
+                    name=f"layer_{layer_index}_block_{block_index}_phi_deg",
+                    index=index,
+                    kind="real",
+                    bounds=(float(lower[index]), float(upper[index])),
+                    layer_index=layer_index,
+                    block_index=block_index,
+                )
+            )
+            index += 1
+            variables.append(
+                GenomeVariable(
+                    name=f"layer_{layer_index}_block_{block_index}_n_turns",
+                    index=index,
+                    kind="integer",
+                    bounds=(float(lower[index]), float(upper[index])),
+                    layer_index=layer_index,
+                    block_index=block_index,
+                )
+            )
+            index += 1
+            if block_index > 0:
+                variables.append(
+                    GenomeVariable(
+                        name=f"layer_{layer_index}_block_{block_index}_alpha_deg",
+                        index=index,
+                        kind="real",
+                        bounds=(float(lower[index]), float(upper[index])),
+                        layer_index=layer_index,
+                        block_index=block_index,
+                    )
+                )
+                index += 1
+    return tuple(variables)
+
+
+def mixed_variable_spec(topology: Topology) -> dict[str, Real | Integer]:
+    """Return pymoo mixed-variable declarations for this topology."""
+
+    variables: dict[str, Real | Integer] = {}
+    for variable in genome_variables(topology):
+        if variable.kind == "integer":
+            variables[variable.name] = Integer(
+                bounds=(int(variable.bounds[0]), int(variable.bounds[1]))
+            )
+        else:
+            variables[variable.name] = Real(bounds=variable.bounds)
+    return variables
+
+
+def flatten_mixed_genome(genome: Mapping[str, float] | Sequence[float], topology: Topology) -> np.ndarray:
+    """Convert a pymoo mixed-variable dict or flat sequence to DOT's flat genome."""
+
+    if not isinstance(genome, Mapping):
+        return np.asarray(genome, dtype=float)
+
+    values = np.empty(topology.n_var, dtype=float)
+    for variable in genome_variables(topology):
+        values[variable.index] = float(genome[variable.name])
+    return values
 
 
 def _require_finite(value: float, name: str) -> None:

@@ -11,7 +11,7 @@ from pymoo.core.problem import Problem
 from dot.geometry import CableSpec
 from dot.geometry.constraints import check_feasibility
 
-from .genome import Topology, decode, genome_bounds
+from .genome import Topology, decode, flatten_mixed_genome, genome_bounds, mixed_variable_spec
 from .objectives import LayerConductorData, field_quality_objective, load_line_margin_objective
 from .operating_point import operating_point
 
@@ -71,10 +71,24 @@ class DipoleOptimizationProblem(Problem):
             n_ieq_constr=1,
             xl=lower,
             xu=upper,
+            vars=mixed_variable_spec(topology),
         )
 
     def _evaluate(self, x, out, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
-        rows = np.atleast_2d(np.asarray(x, dtype=float))
+        if isinstance(x, dict):
+            rows = np.atleast_2d(flatten_mixed_genome(x, self.topology))
+        elif isinstance(x, np.ndarray) and x.dtype == object and x.size and isinstance(x.flat[0], dict):
+            rows = np.asarray(
+                [flatten_mixed_genome(row, self.topology) for row in x],
+                dtype=float,
+            )
+        elif isinstance(x, list) and x and isinstance(x[0], dict):
+            rows = np.asarray(
+                [flatten_mixed_genome(row, self.topology) for row in x],
+                dtype=float,
+            )
+        else:
+            rows = np.atleast_2d(np.asarray(x, dtype=float))
         objectives = np.empty((rows.shape[0], 2), dtype=float)
         constraints = np.empty((rows.shape[0], 1), dtype=float)
 
