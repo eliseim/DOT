@@ -22,3 +22,6 @@ htmlcov/
 
 # coordinator scratch/exploratory scripts, never part of the package
 .tmp_scratch/
+
+# local Claude Code session state, not project content
+.claude/
