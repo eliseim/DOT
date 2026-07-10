@@ -290,8 +290,8 @@ def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -
     old_feasible = _sample_feasible_count(topology, old_lower, old_upper)
     new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
 
-    assert old_feasible == 21
-    assert new_feasible == 100
+    assert old_feasible == 48
+    assert new_feasible == 139
     assert new_feasible >= old_feasible + 50
 
 

@@ -36,7 +36,7 @@ def test_problem_marks_operating_current_above_cap_as_constraint_violation() -> 
         _feasibility(),
     )
     over_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 0.0])
-    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 2.0, 0.0])
+    under_cap_genome = np.asarray([12.0, 10.0, 1.0, 40.0, 2.0, 30.0])
 
     over_f, over_g = problem.evaluate(over_cap_genome, return_values_of=["F", "G"])
     under_f, under_g = problem.evaluate(under_cap_genome, return_values_of=["F", "G"])

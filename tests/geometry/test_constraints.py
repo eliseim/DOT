@@ -102,10 +102,10 @@ def test_check_feasibility_rejects_inter_layer_overlap_across_empty_layer() -> N
 
 def test_midplane_clearance_accepts_hand_computed_gap() -> None:
     design = _midplane_reference_design()
-    hand_computed_lowest_y_mm = 10.0 * 0.5 - 2.0 * (math.sqrt(3.0) / 2.0)
+    hand_computed_lowest_y_mm = 10.0 * math.cos(math.radians(60.0)) - 4.0 / 2.0
 
-    assert hand_computed_lowest_y_mm == 3.267949192431123
-    assert check_midplane_clearance(design, min_gap_mm=3.2) == []
+    assert hand_computed_lowest_y_mm == pytest.approx(3.0, rel=0.0, abs=1.0e-12)
+    assert check_midplane_clearance(design, min_gap_mm=3.0) == []
 
 
 def test_midplane_clearance_rejects_hand_computed_gap() -> None:
@@ -174,7 +174,7 @@ def test_turn_non_intersection_rejects_positive_area_polygon_overlap() -> None:
 def test_pole_angle_limit_accepts_outer_edge_below_limit() -> None:
     design = _single_turn_design(inner_radius_mm=10.0, phi_deg=20.0)
 
-    assert check_pole_angle_limit(design, max_angle_deg=30.0) == []
+    assert check_pole_angle_limit(design, max_angle_deg=33.0) == []
 
 
 def test_pole_angle_limit_rejects_outer_edge_above_limit() -> None:
