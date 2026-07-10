@@ -58,6 +58,34 @@ class Type1FitCoefficients:
 
 
 @dataclass(frozen=True, slots=True)
+class Type11FitCoefficients:
+    """CERN high-field Nb3Sn REMFIT type-11 coefficients C1..C7."""
+
+    c0: float
+    bc20_t: float
+    tc0_k: float
+    alpha: float
+    v: float
+    p: float
+    q: float
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("c0", self.c0),
+            ("bc20_t", self.bc20_t),
+            ("tc0_k", self.tc0_k),
+            ("alpha", self.alpha),
+            ("v", self.v),
+            ("p", self.p),
+            ("q", self.q),
+        ):
+            _require_finite_positive(value, name)
+
+
+RemfitCoefficients = Type1FitCoefficients | Type11FitCoefficients
+
+
+@dataclass(frozen=True, slots=True)
 class FilamentRecord:
     """FILAMENT row carrying the critical-current REMFIT name."""
 
@@ -94,7 +122,7 @@ class ConductorResolution:
     conductor: ConductorRecord | None = None
     strand: StrandRecord | None = None
     cable: CableRecord | None = None
-    remfit: Type1FitCoefficients | None = None
+    remfit: RemfitCoefficients | None = None
     temperature_k: float | None = None
     unsupported_fit_type: int | None = None
     remfit_name: str | None = None
@@ -111,7 +139,7 @@ class CadataRecords:
 
     strands: dict[str, StrandRecord]
     cables: dict[str, CableRecord]
-    remfits: dict[str, Type1FitCoefficients]
+    remfits: dict[str, RemfitCoefficients]
     filaments: dict[str, FilamentRecord]
     conductors: dict[str, ConductorRecord]
 
@@ -177,11 +205,14 @@ def find_type1_remfit(text: str, name: str) -> Type1FitCoefficients:
     """Return the named type-1 REMFIT coefficients without validating others."""
 
     records = parse_cadata_text(text, remfit_name=name)
-    return records.remfits[name]
+    remfit = records.remfits[name]
+    if not isinstance(remfit, Type1FitCoefficients):
+        raise UnsupportedFitTypeError(11, name)
+    return remfit
 
 
 def resolve_conductor(text: str, name: str) -> ConductorResolution:
-    """Resolve a named CONDUCTOR row to linked type-1 conductor data.
+    """Resolve a named CONDUCTOR row to linked supported conductor data.
 
     Unsupported REMFIT types are returned as typed resolution results instead
     of escaping as ``UnsupportedFitTypeError``.
@@ -212,7 +243,7 @@ def resolve_conductor(text: str, name: str) -> ConductorResolution:
     remfit_name = _critical_current_remfit_name(conductor, filaments)
     remfit_row = _find_remfit_row(sections.get("REMFIT", ()), remfit_name)
     try:
-        remfit = _parse_type1_remfit_row(remfit_row)
+        remfit = _parse_supported_remfit_row(remfit_row)
     except UnsupportedFitTypeError as exc:
         return ConductorResolution(
             status="unsupported_fit_type",
@@ -310,7 +341,7 @@ def _parse_remfits(
     *,
     remfit_name: str | None,
     first_supported_remfit: bool,
-) -> dict[str, Type1FitCoefficients]:
+) -> dict[str, RemfitCoefficients]:
     if remfit_name is not None:
         for row in rows:
             if len(row) < 2:
@@ -318,18 +349,18 @@ def _parse_remfits(
             name = row[1]
             if name != remfit_name:
                 continue
-            return {name: _parse_type1_remfit_row(row)}
+            return {name: _parse_supported_remfit_row(row)}
         raise ValueError(f"REMFIT record {remfit_name!r} not found")
 
-    remfits: dict[str, Type1FitCoefficients] = {}
+    remfits: dict[str, RemfitCoefficients] = {}
     for row in rows:
         if first_supported_remfit:
             if len(row) < 3:
                 continue
             fit_type = int(float(row[2]))
-            if fit_type != 1:
+            if fit_type not in (1, 11):
                 continue
-        fit = _parse_type1_remfit_row(row)
+        fit = _parse_supported_remfit_row(row)
         remfits[row[1]] = fit
         if first_supported_remfit:
             break
@@ -343,14 +374,16 @@ def _find_remfit_row(rows: list[list[str]], remfit_name: str) -> list[str]:
     raise ValueError(f"REMFIT record {remfit_name!r} not found")
 
 
-def _parse_type1_remfit_row(row: list[str]) -> Type1FitCoefficients:
+def _parse_supported_remfit_row(row: list[str]) -> RemfitCoefficients:
     if len(row) < 10:
         raise ValueError(f"REMFIT row has too few columns: {row!r}")
     name = row[1]
     fit_type = int(float(row[2]))
-    if fit_type != 1:
-        raise UnsupportedFitTypeError(fit_type, name)
-    return Type1FitCoefficients(*(float(value) for value in row[3:10]))
+    if fit_type == 1:
+        return Type1FitCoefficients(*(float(value) for value in row[3:10]))
+    if fit_type == 11:
+        return Type11FitCoefficients(*(float(value) for value in row[3:10]))
+    raise UnsupportedFitTypeError(fit_type, name)
 
 
 def _section_rows(lines: list[str]) -> dict[str, list[list[str]]]:

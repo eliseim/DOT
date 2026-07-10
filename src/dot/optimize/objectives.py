@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from dot.conductors import (
     CableRecord,
     StrandRecord,
-    Type1FitCoefficients,
     load_line_margin_percent,
     solve_short_sample_current,
 )
+from dot.conductors.cadata import RemfitCoefficients
+from dot.conductors.critical_surface import upper_critical_field
 from dot.geometry import CableSpec, DipoleDesign, Point, TurnPolygon
 from dot.physics import field_at, multipole_coefficients, place_line_current_sources
 
@@ -24,7 +25,7 @@ class LayerConductorData:
 
     strand: StrandRecord
     cable: CableRecord
-    remfit: Type1FitCoefficients
+    remfit: RemfitCoefficients
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,25 +61,26 @@ def load_line_margin_objective(
     evaluated_layers = tuple(index for index, layer_data in enumerate(cadata_by_layer) if layer_data is not None)
     if not evaluated_layers:
         raise ValueError("load-line margin requires conductor data for at least one layer")
-    limiting_turn, peak_field_t = _peak_field_on_own_turns(design, evaluated_layers=evaluated_layers)
-    operating_current_a = abs(limiting_turn.turn.current_a)
-    if operating_current_a == 0.0:
-        raise ValueError("operating current must be nonzero")
-    if limiting_turn.layer_index >= len(cadata_by_layer):
-        raise ValueError("missing conductor data for limiting layer")
-    layer_data = cadata_by_layer[limiting_turn.layer_index]
-    if layer_data is None:
-        raise ValueError("missing conductor data for limiting layer")
-    k_field_per_current = peak_field_t / operating_current_a
-    short_sample_current_a = solve_short_sample_current(
-        layer_data.remfit,
-        layer_data.strand,
-        layer_data.cable,
-        temperature_k,
-        k_field_per_current,
-        i_hi=_load_line_upper_bracket(layer_data.remfit, temperature_k, k_field_per_current),
-    )
-    return load_line_margin_percent(operating_current_a, short_sample_current_a)
+    margins: list[float] = []
+    for layer_index in evaluated_layers:
+        limiting_turn, peak_field_t = _peak_field_on_own_turns(design, evaluated_layers=(layer_index,))
+        operating_current_a = abs(limiting_turn.turn.current_a)
+        if operating_current_a == 0.0:
+            raise ValueError("operating current must be nonzero")
+        layer_data = cadata_by_layer[layer_index]
+        if layer_data is None:
+            raise ValueError("missing conductor data for limiting layer")
+        k_field_per_current = peak_field_t / operating_current_a
+        short_sample_current_a = solve_short_sample_current(
+            layer_data.remfit,
+            layer_data.strand,
+            layer_data.cable,
+            temperature_k,
+            k_field_per_current,
+            i_hi=_load_line_upper_bracket(layer_data.remfit, temperature_k, k_field_per_current),
+        )
+        margins.append(load_line_margin_percent(operating_current_a, short_sample_current_a))
+    return min(margins)
 
 
 def _design_sources(design: DipoleDesign):
@@ -156,11 +158,11 @@ def _bare_cable(cable: CableSpec) -> CableSpec:
 
 
 def _load_line_upper_bracket(
-    coeffs: Type1FitCoefficients,
+    coeffs: RemfitCoefficients,
     temperature_k: float,
     k_field_per_current: float,
 ) -> float:
-    bc2_t = coeffs.c7 * (1.0 - (temperature_k / coeffs.c2) ** 1.7)
+    bc2_t = upper_critical_field(coeffs, temperature_k)
     domain_upper = bc2_t / k_field_per_current
     return math.nextafter(domain_upper * (1.0 - 1.0e-12), 0.0)
 

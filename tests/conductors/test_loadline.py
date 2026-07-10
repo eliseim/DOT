@@ -9,6 +9,7 @@ from dot.conductors import (
     load_line_margin_percent,
     solve_short_sample_current,
 )
+from dot.conductors.cadata import Type11FitCoefficients
 
 
 def test_short_sample_solver_matches_closed_form_linear_case() -> None:
@@ -49,3 +50,28 @@ def test_load_line_margin_percent_matches_definition() -> None:
 
     assert margin > 0.0
     assert math.isclose(margin, expected, rel_tol=0.0, abs_tol=1.0e-12)
+
+
+def test_short_sample_solver_accepts_type11_nb3sn_coefficients() -> None:
+    coeffs = Type11FitCoefficients(
+        c0=2.14462e11,
+        bc20_t=29.38,
+        tc0_k=16.0,
+        alpha=0.96,
+        v=1.52,
+        p=0.5,
+        q=2.0,
+    )
+    strand = StrandRecord(diameter_mm=0.85, cu_to_sc_ratio=1.2)
+    cable = CableRecord(n_strands=40, degradation_percent=2.0)
+
+    solved = solve_short_sample_current(
+        coeffs,
+        strand,
+        cable,
+        temperature_k=1.9,
+        k_field_per_current=1.0e-3,
+    )
+
+    assert math.isfinite(solved)
+    assert solved > 0.0
