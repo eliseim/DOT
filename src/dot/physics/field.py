@@ -25,6 +25,8 @@ from .sources import LineCurrentSource
 
 MU0_OVER_2PI = 2.0e-7
 MM_TO_M = 1.0e-3
+FIELD_DENSE_INTERMEDIATE_LIMIT_BYTES = 256 * 1024 * 1024
+FIELD_DENSE_ARRAYS_PER_CHUNK = 5
 
 
 class FieldSingularityError(ValueError):
@@ -151,15 +153,37 @@ def field_at_many_explicit_sources(
         raise ValueError("probe coordinates must be finite")
 
     probe_shape = x_probe.shape
-    dx_m = (x_probe.reshape(-1, 1) - source_array.x_mm.reshape(1, -1)) * MM_TO_M
-    dy_m = (y_probe.reshape(-1, 1) - source_array.y_mm.reshape(1, -1)) * MM_TO_M
-    rho2_m2 = dx_m * dx_m + dy_m * dy_m
-    if np.any(rho2_m2 == 0.0):
-        raise FieldSingularityError("probe point coincides with a source")
-    scale = MU0_OVER_2PI * source_array.current_a.reshape(1, -1) / rho2_m2
-    bx_t = np.sum(-scale * dy_m, axis=1)
-    by_t = np.sum(scale * dx_m, axis=1)
+    x_probe_flat = x_probe.reshape(-1)
+    y_probe_flat = y_probe.reshape(-1)
+    n_probe = x_probe_flat.size
+    n_sources = source_array.x_mm.size
+
+    if n_probe == 0:
+        empty = np.empty(probe_shape, dtype=np.float64)
+        return (empty.copy(), empty.copy())
+    if n_sources == 0:
+        zeros = np.zeros(probe_shape, dtype=np.float64)
+        return (zeros.copy(), zeros.copy())
+
+    sources_per_chunk = _field_sources_per_chunk(n_probe)
+    bx_t = np.zeros(n_probe, dtype=np.float64)
+    by_t = np.zeros(n_probe, dtype=np.float64)
+    for start in range(0, n_sources, sources_per_chunk):
+        stop = min(start + sources_per_chunk, n_sources)
+        dx_m = (x_probe_flat.reshape(-1, 1) - source_array.x_mm[start:stop].reshape(1, -1)) * MM_TO_M
+        dy_m = (y_probe_flat.reshape(-1, 1) - source_array.y_mm[start:stop].reshape(1, -1)) * MM_TO_M
+        rho2_m2 = dx_m * dx_m + dy_m * dy_m
+        if np.any(rho2_m2 == 0.0):
+            raise FieldSingularityError("probe point coincides with a source")
+        scale = MU0_OVER_2PI * source_array.current_a[start:stop].reshape(1, -1) / rho2_m2
+        bx_t += np.sum(-scale * dy_m, axis=1)
+        by_t += np.sum(scale * dx_m, axis=1)
     return (bx_t.reshape(probe_shape), by_t.reshape(probe_shape))
+
+
+def _field_sources_per_chunk(n_probe: int) -> int:
+    elements_per_source = max(n_probe * FIELD_DENSE_ARRAYS_PER_CHUNK, 1)
+    return max(FIELD_DENSE_INTERMEDIATE_LIMIT_BYTES // (np.dtype(np.float64).itemsize * elements_per_source), 1)
 
 
 def _require_finite(value: float, name: str) -> None:
