@@ -7,7 +7,7 @@ import pytest
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer, TurnPolygon
 
 
-def test_single_turn_corners_for_hand_checked_axis_aligned_case() -> None:
+def test_single_turn_corners_for_hand_checked_absolute_alpha_axis_aligned_case() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.5)
 
     turn = TurnPolygon.from_parameters(
@@ -19,18 +19,54 @@ def test_single_turn_corners_for_hand_checked_axis_aligned_case() -> None:
     )
 
     assert turn.corners == (
-        (-2.5, 10.0),
-        (2.5, 10.0),
-        (2.5, 13.0),
-        (-2.5, 13.0),
+        (0.0, 7.5),
+        (0.0, 12.5),
+        (3.0, 12.5),
+        (3.0, 7.5),
     )
     assert turn.current_a == 1000.0
+
+
+def test_turn_height_axis_uses_absolute_alpha_independent_of_phi() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.5)
+    expected_height_axis = (
+        math.cos(math.radians(46.4651)),
+        math.sin(math.radians(46.4651)),
+    )
+
+    turns = tuple(
+        TurnPolygon.from_parameters(
+            inner_radius_mm=25.0,
+            phi_deg=phi_deg,
+            alpha_deg=-46.4651,
+            cable=cable,
+            current_a=1000.0,
+        )
+        for phi_deg in (41.3, 72.0)
+    )
+
+    for turn in turns:
+        actual_height_axis = (
+            (turn.corners[3][0] - turn.corners[0][0]) / cable.insulated_height_mm,
+            (turn.corners[3][1] - turn.corners[0][1]) / cable.insulated_height_mm,
+        )
+        assert actual_height_axis == pytest.approx(expected_height_axis, rel=0.0, abs=1e-12)
+
+    first_axis = (
+        (turns[0].corners[3][0] - turns[0].corners[0][0]) / cable.insulated_height_mm,
+        (turns[0].corners[3][1] - turns[0].corners[0][1]) / cable.insulated_height_mm,
+    )
+    second_axis = (
+        (turns[1].corners[3][0] - turns[1].corners[0][0]) / cable.insulated_height_mm,
+        (turns[1].corners[3][1] - turns[1].corners[0][1]) / cable.insulated_height_mm,
+    )
+    assert second_axis == pytest.approx(first_axis, rel=0.0, abs=1e-12)
 
 
 def test_block_layer_and_design_flatten_azimuthally_wound_turns() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.5)
     block = Block(
-        phi_deg=0.0,
+        phi_deg=90.0,
         alpha_deg=0.0,
         n_turns=2,
         cable=cable,
@@ -43,31 +79,28 @@ def test_block_layer_and_design_flatten_azimuthally_wound_turns() -> None:
     turns = design.all_turns()
 
     assert len(turns) == 2
-    assert turns[0].corners[0] == (-2.5, 10.0)
-    assert turns[0].corners[2] == (2.5, 13.0)
-    expected_phi = math.degrees(cable.insulated_width_mm / 10.0)
+    assert turns[0].corners[0] == pytest.approx((10.0, -2.5))
+    assert turns[0].corners[2] == pytest.approx((13.0, 2.5))
+    expected_phi = 90.0 - math.degrees(cable.insulated_width_mm / 10.0)
     expected_anchor = (10.0 * math.sin(math.radians(expected_phi)), 10.0 * math.cos(math.radians(expected_phi)))
-    expected_tangent = (math.cos(math.radians(expected_phi)), -math.sin(math.radians(expected_phi)))
     assert turns[1].corners[0] == pytest.approx(
         (
-            expected_anchor[0] - 0.5 * cable.insulated_width_mm * expected_tangent[0],
-            expected_anchor[1] - 0.5 * cable.insulated_width_mm * expected_tangent[1],
+            expected_anchor[0],
+            expected_anchor[1] - 0.5 * cable.insulated_width_mm,
         )
     )
     assert turns[1].corners[2] == pytest.approx(
         (
-            expected_anchor[0] + 0.5 * cable.insulated_width_mm * expected_tangent[0]
-            + cable.insulated_height_mm * math.sin(math.radians(expected_phi)),
-            expected_anchor[1] + 0.5 * cable.insulated_width_mm * expected_tangent[1]
-            + cable.insulated_height_mm * math.cos(math.radians(expected_phi)),
+            expected_anchor[0] + cable.insulated_height_mm,
+            expected_anchor[1] + 0.5 * cable.insulated_width_mm,
         )
     )
 
 
-def test_block_turns_step_phi_by_insulated_width_at_constant_radius() -> None:
+def test_block_turns_step_phi_toward_pole_by_insulated_width_at_constant_radius() -> None:
     cable = CableSpec(width_mm=10.0, height_mm=2.0, insulation_thickness_mm=0.0)
     block = Block(
-        phi_deg=30.0,
+        phi_deg=60.0,
         alpha_deg=0.0,
         n_turns=3,
         cable=cable,
@@ -77,7 +110,37 @@ def test_block_turns_step_phi_by_insulated_width_at_constant_radius() -> None:
 
     turns = block.turns()
 
+    anchors = tuple(
+        ((turn.corners[0][0] + turn.corners[1][0]) / 2.0, (turn.corners[0][1] + turn.corners[1][1]) / 2.0)
+        for turn in turns
+    )
+    phis = tuple(math.degrees(math.atan2(anchor[0], anchor[1])) for anchor in anchors)
+    radii = tuple(math.hypot(*anchor) for anchor in anchors)
     expected_step = math.degrees(cable.insulated_width_mm / block.inner_radius_mm)
+
+    assert phis == pytest.approx(
+        (
+            60.0,
+            60.0 - expected_step,
+            60.0 - 2.0 * expected_step,
+        )
+    )
+    assert radii == pytest.approx((100.0, 100.0, 100.0))
+
+
+def test_block_turns_keep_radius_when_width_stack_reaches_pole() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    block = Block(
+        phi_deg=45.0,
+        alpha_deg=0.0,
+        n_turns=4,
+        cable=cable,
+        inner_radius_mm=30.0,
+        current_a=1000.0,
+    )
+
+    turns = block.turns()
+
     anchors = tuple(
         ((turn.corners[0][0] + turn.corners[1][0]) / 2.0, (turn.corners[0][1] + turn.corners[1][1]) / 2.0)
         for turn in turns
@@ -85,5 +148,12 @@ def test_block_turns_step_phi_by_insulated_width_at_constant_radius() -> None:
     phis = tuple(math.degrees(math.atan2(anchor[0], anchor[1])) for anchor in anchors)
     radii = tuple(math.hypot(*anchor) for anchor in anchors)
 
-    assert phis == pytest.approx((30.0, 30.0 + expected_step, 30.0 + 2.0 * expected_step))
-    assert radii == pytest.approx((100.0, 100.0, 100.0))
+    assert phis == pytest.approx(
+        (
+            45.0,
+            math.degrees(math.acos((30.0 * math.cos(math.radians(45.0)) + 4.0) / 30.0)),
+            math.degrees(math.acos((30.0 * math.cos(math.radians(45.0)) + 8.0) / 30.0)),
+            0.0,
+        )
+    )
+    assert radii == pytest.approx((30.0, 30.0, 30.0, 30.0))

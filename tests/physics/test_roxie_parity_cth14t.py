@@ -9,7 +9,7 @@ from dot.physics import field_at, multipole_coefficients, place_line_current_sou
 
 CURRENT_A = 12238.0
 R_REF_MM = 16.6667
-REFERENCE_FIELD_T = 14.005771
+REFERENCE_FIELD_T = 12.419091
 REFERENCE_MAIN_DIPOLE_UNITS = 10000.0
 
 CTH_HF = CableSpec(width_mm=1.594, height_mm=18.363, insulation_thickness_mm=0.145)
@@ -51,7 +51,7 @@ def test_dot_field_quality_matches_real_no_iron_roxie_cth14t_output() -> None:
     field_magnitude_t = math.hypot(bx_t, by_t)
     coefficients = multipole_coefficients(sources, order=13, r_ref_mm=R_REF_MM)
 
-    assert field_magnitude_t == pytest.approx(REFERENCE_FIELD_T, rel=0.05)
+    assert field_magnitude_t == pytest.approx(REFERENCE_FIELD_T, rel=0.02)
     assert coefficients[0][0] == pytest.approx(REFERENCE_MAIN_DIPOLE_UNITS, abs=2.0)
     for normal, _ in coefficients:
         assert math.isfinite(normal)
