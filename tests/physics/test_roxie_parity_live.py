@@ -134,8 +134,18 @@ def test_live_roxie_peak_field_and_margin_parity_cth_lf(tmp_path: Path) -> None:
         for case_name, design in _cth_lf_margin_cases()
     )
 
-    assert len(comparisons) == 5
+    print("\n--- CTH_LF Peak Field and Margin Parity Results ---")
+    for c in comparisons:
+        print(f"CASE {c.case_name}:")
+        print(f"  DOT Peak Field: {c.dot_peak_t:.6f} T, ROXIE Peak Field: {c.roxie_peak_t:.6f} T")
+        print(f"  Peak Field Rel Error: {c.peak_relative_error * 100:.4f}%")
+        print(f"  DOT Margin: {c.dot_margin_percent:.4f}%, ROXIE Margin: {c.roxie_margin_percent:.4f}%")
+        print(f"  Margin Error pp: {c.margin_error_percentage_points:.4f}")
+    print("--------------------------------------------------\n")
+
+    assert len(comparisons) == 8
     assert any(sum(block.n_turns for layer in design.layers for block in layer.blocks) == 1 for _, design in _cth_lf_margin_cases())
+    assert any(sum(block.n_turns for layer in design.layers for block in layer.blocks) > 1 for _, design in _cth_lf_margin_cases())
     assert any(len(design.layers) > 1 for _, design in _cth_lf_margin_cases())
     assert all(comparison.peak_relative_error < FIELD_TOLERANCE_REL for comparison in comparisons)
     assert all(
@@ -227,6 +237,9 @@ def _cth_lf_margin_cases() -> tuple[tuple[str, DipoleDesign], ...]:
         ("cth_lf_single_turn_diag_a", _cth_lf_design(((36.539, 27.667, 1),))),
         ("cth_lf_two_layer_diag_b", _cth_lf_design(((38.657, 41.683, 1), (59.041, 46.598, 1)))),
         ("cth_lf_single_turn_r34_phi36", _cth_lf_design(((34.0, 36.0, 1),))),
+        ("cth_lf_custom_two_turns_block", _cth_lf_design(((35.0, 35.0, 2),))),
+        ("cth_lf_three_turn_r42_phi48", _cth_lf_design(((42.0, 48.0, 3),))),
+        ("cth_lf_custom_four_turns_r50_phi40", _cth_lf_design(((50.0, 40.0, 4),))),
         ("cth_lf_two_layer_single_turns", _cth_lf_design(((33.0, 30.0, 1), (55.0, 50.0, 1)))),
         ("cth_lf_three_layer_single_turns", _cth_lf_design(((32.0, 42.0, 1), (53.0, 38.0, 1), (74.0, 48.0, 1)))),
     )
