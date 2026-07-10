@@ -142,13 +142,14 @@ def run_campaign(
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
-    problem = DipoleOptimizationProblem(topology, targets, feasibility)
+    problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
     algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size)
     result = minimize(
         problem,
         algorithm,
         ("n_gen", n_gen),
         seed=seed,
+        callback=lambda algorithm: problem.set_generation(algorithm.n_gen),
         verbose=False,
     )
 

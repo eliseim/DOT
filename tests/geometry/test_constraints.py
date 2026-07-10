@@ -30,6 +30,7 @@ def test_aperture_clearance_rejects_turn_inside_aperture() -> None:
     assert violations[0].layer_index == 0
     assert violations[0].block_index == 0
     assert violations[0].turn_index == 0
+    assert violations[0].severity == pytest.approx(1.4332394106670137)
 
 
 def test_inter_layer_spacing_accepts_radially_separated_layers() -> None:
@@ -59,6 +60,7 @@ def test_inter_layer_spacing_rejects_radially_overlapping_layers() -> None:
 
     assert [violation.constraint_name for violation in violations] == ["inter_layer_spacing"]
     assert violations[0].layer_index == 1
+    assert violations[0].severity == pytest.approx(0.28033988749894867)
 
 
 def test_check_feasibility_rejects_inter_layer_overlap_across_empty_layer() -> None:
@@ -117,6 +119,7 @@ def test_midplane_clearance_rejects_hand_computed_gap() -> None:
     assert violations[0].layer_index == 0
     assert violations[0].block_index == 0
     assert violations[0].turn_index == 0
+    assert violations[0].severity == pytest.approx(0.3)
 
 
 def test_turn_non_intersection_accepts_edge_contact_between_stacked_turns() -> None:
@@ -169,6 +172,7 @@ def test_turn_non_intersection_rejects_positive_area_polygon_overlap() -> None:
     assert violations[0].other_layer_index == 0
     assert violations[0].other_block_index == 1
     assert violations[0].other_turn_index == 0
+    assert violations[0].severity > 0.0
 
 
 def test_pole_angle_limit_accepts_outer_edge_below_limit() -> None:
@@ -186,6 +190,7 @@ def test_pole_angle_limit_rejects_outer_edge_above_limit() -> None:
     assert violations[0].layer_index == 0
     assert violations[0].block_index == 0
     assert violations[0].turn_index == 0
+    assert violations[0].severity > 0.0
 
 
 def test_pole_angle_limit_applies_per_layer_limits() -> None:
