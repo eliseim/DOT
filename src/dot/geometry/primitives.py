@@ -2,8 +2,10 @@
 
 The angle ``phi_deg`` is measured clockwise from the positive y-axis toward
 positive x.  Thus ``phi_deg = 0`` lies on the pole axis and ``phi_deg = 90``
-lies on the midplane.  A turn is anchored at the midpoint of its inner face.
-The turn anchor remains defined by ``inner_radius_mm`` and ``phi_deg``.  ROXIE's
+lies on the midplane.  Keystoned turns are anchored at the midplane-side corner
+of their inner face; rectangular legacy turns retain their inner-face midpoint
+anchor.  The turn anchor remains defined by ``inner_radius_mm`` and
+``phi_deg``.  ROXIE's
 ``alpha`` convention is absolute in the global x-y plane: the cable height axis
 depends only on ``alpha_deg``, not on the turn's polar angle.
 """
@@ -66,13 +68,28 @@ class TurnPolygon:
 
         alpha = math.radians(alpha_deg)
         height_axis, width_axis = _turn_axes(alpha)
-        half_width = 0.5 * cable.insulated_width_mm
+        if math.isclose(
+            cable.insulated_width_inner_mm,
+            cable.insulated_width_outer_mm,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            half_width = 0.5 * cable.insulated_width_inner_mm
+            inner_minus = _add(anchor, _scale(width_axis, -half_width))
+            inner_plus = _add(anchor, _scale(width_axis, half_width))
+            outer_plus = _add(inner_plus, _scale(height_axis, cable.insulated_height_mm))
+            outer_minus = _add(inner_minus, _scale(height_axis, cable.insulated_height_mm))
+            return cls(
+                corners=(inner_minus, inner_plus, outer_plus, outer_minus),
+                current_a=current_a,
+            )
+
         height = cable.insulated_height_mm
 
-        inner_minus = _add(anchor, _scale(width_axis, -half_width))
-        inner_plus = _add(anchor, _scale(width_axis, half_width))
-        outer_plus = _add(inner_plus, _scale(height_axis, height))
-        outer_minus = _add(inner_minus, _scale(height_axis, height))
+        inner_minus = anchor
+        inner_plus = _add(anchor, _scale(width_axis, cable.insulated_width_inner_mm))
+        outer_minus = _add(anchor, _scale(height_axis, height))
+        outer_plus = _add(outer_minus, _scale(width_axis, cable.insulated_width_outer_mm))
         return cls(
             corners=(inner_minus, inner_plus, outer_plus, outer_minus),
             current_a=current_a,
@@ -112,10 +129,10 @@ class Block:
         )
         height_axis, width_axis = _turn_axes(math.radians(self.alpha_deg))
         final_width_coordinate = _dot(turn_0_anchor, width_axis) + (
-            (self.n_turns - 1) * self.cable.insulated_width_mm
+            (self.n_turns - 1) * self.cable.insulated_width_inner_mm
         )
         if abs(final_width_coordinate) <= self.inner_radius_mm:
-            delta_phi_deg = math.degrees(self.cable.insulated_width_mm / self.inner_radius_mm)
+            delta_phi_deg = math.degrees(self.cable.insulated_width_inner_mm / self.inner_radius_mm)
             return tuple(
                 TurnPolygon.from_parameters(
                     inner_radius_mm=self.inner_radius_mm,
@@ -134,7 +151,7 @@ class Block:
                     height_axis=height_axis,
                     width_axis=width_axis,
                     inner_radius_mm=self.inner_radius_mm,
-                    width_offset_mm=index * self.cable.insulated_width_mm,
+                    width_offset_mm=index * self.cable.insulated_width_inner_mm,
                 ),
                 alpha_deg=self.alpha_deg,
                 cable=self.cable,

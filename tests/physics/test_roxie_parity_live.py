@@ -17,8 +17,20 @@ ROXIE_CADATA = Path("C:/Users/elisei/Desktop/dipole_designer/roxie_CTH_cables.ca
 FIELD_TOLERANCE_REL = 0.02
 
 CURRENT_A = 12238.0
-CTH_HF = CableSpec(width_mm=1.594, height_mm=18.363, insulation_thickness_mm=0.145)
-CTH_LF = CableSpec(width_mm=1.91, height_mm=16.17, insulation_thickness_mm=0.145)
+CTH_HF = CableSpec(
+    width_inner_mm=1.53,
+    width_outer_mm=1.658,
+    height_mm=18.363,
+    insulation_radial_mm=0.145,
+    insulation_azimuthal_mm=0.145,
+)
+CTH_LF = CableSpec(
+    width_inner_mm=1.736,
+    width_outer_mm=2.084,
+    height_mm=16.17,
+    insulation_radial_mm=0.145,
+    insulation_azimuthal_mm=0.145,
+)
 
 BLOCK_TABLE = (
     (1, 4, 25.0, 0.343771, 0.0, CTH_HF, 20),
@@ -74,6 +86,30 @@ def test_live_roxie_field_parity_alpha_zero_single_block(tmp_path: Path) -> None
     assert alpha_zero_comparison.relative_error < FIELD_TOLERANCE_REL
 
 
+@pytest.mark.parametrize(
+    ("inner_radius_mm", "phi_deg"),
+    (
+        (35.0, 40.0),
+        (40.0, 30.0),
+        (45.0, 50.0),
+    ),
+)
+def test_live_roxie_field_parity_alpha_zero_single_turn_cases(
+    tmp_path: Path,
+    inner_radius_mm: float,
+    phi_deg: float,
+) -> None:
+    _require_live_roxie()
+
+    comparison = _alpha_zero_single_turn_comparison(
+        tmp_path,
+        inner_radius_mm=inner_radius_mm,
+        phi_deg=phi_deg,
+    )
+
+    assert comparison.relative_error < FIELD_TOLERANCE_REL
+
+
 def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
     unit_current_design = _alpha_zero_single_block_design(current_a=1.0)
     unit_field_t = _dot_field(unit_current_design)
@@ -96,6 +132,60 @@ def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
         block_records=(record,),
         r_ref_mm=25.0,
     )
+
+
+def _alpha_zero_single_turn_comparison(
+    tmp_path: Path,
+    *,
+    inner_radius_mm: float,
+    phi_deg: float,
+) -> LiveComparison:
+    unit_current_design = _alpha_zero_single_turn_design(
+        current_a=1.0,
+        inner_radius_mm=inner_radius_mm,
+        phi_deg=phi_deg,
+    )
+    unit_field_t = _dot_field(unit_current_design)
+    current_a = 5.0 / unit_field_t
+    design = _alpha_zero_single_turn_design(
+        current_a=current_a,
+        inner_radius_mm=inner_radius_mm,
+        phi_deg=phi_deg,
+    )
+    record = RoxieBlockRecord(
+        number=1,
+        n_turns=1,
+        radius_mm=inner_radius_mm,
+        phi_roxie_deg=90.0 - phi_deg,
+        alpha_roxie_deg=0.0,
+        current_a=current_a,
+        conductor_name="CTH_HF",
+        n2=20,
+    )
+    return _compare_with_roxie(
+        tmp_path,
+        case_name=f"alpha0_single_turn_r{inner_radius_mm:g}_phi{phi_deg:g}_no_iron",
+        design=design,
+        block_records=(record,),
+        r_ref_mm=25.0,
+    )
+
+
+def _alpha_zero_single_turn_design(
+    *,
+    current_a: float,
+    inner_radius_mm: float,
+    phi_deg: float,
+) -> DipoleDesign:
+    block = Block(
+        phi_deg=phi_deg,
+        alpha_deg=0.0,
+        n_turns=1,
+        cable=CTH_HF,
+        inner_radius_mm=inner_radius_mm,
+        current_a=current_a,
+    )
+    return DipoleDesign(aperture_radius_mm=25.0, layers=(Layer(inner_radius_mm=inner_radius_mm, blocks=(block,)),))
 
 
 def _alpha_zero_single_block_design(*, current_a: float) -> DipoleDesign:

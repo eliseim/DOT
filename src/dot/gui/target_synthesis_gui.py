@@ -431,13 +431,21 @@ class App(tk.Tk):
                 if resolution.status == "unsupported_fit_type":
                     if resolution.conductor is None:
                         raise ValueError(resolution.message)
-                    cables[cable_id] = _cable_spec_from_cadata_text(text, resolution.conductor.cable_name)
+                    cables[cable_id] = _cable_spec_from_cadata_text(
+                        text,
+                        resolution.conductor.cable_name,
+                        conductor_name=resolution.conductor.name,
+                    )
                     conductor_data.append(None)
                     reason = resolution.message
                     margin_exclusions.append(MarginEvaluationExclusion(layer_index=index, reason=reason))
                     self._append_log_if_ready(f"Margin evaluation excluded for Layer {index + 1}: {reason}")
                 else:
-                    cables[cable_id] = _cable_spec_from_cadata_text(text, _resolved_cable_name(resolution))
+                    cables[cable_id] = _cable_spec_from_cadata_text(
+                        text,
+                        _resolved_cable_name(resolution),
+                        conductor_name=resolution.conductor.name if resolution.conductor is not None else None,
+                    )
                     conductor_data.append(_resolved_conductor_data(resolution))
             else:
                 records = parse_cadata_text(text, first_supported_remfit=True)
@@ -642,8 +650,80 @@ def _resolved_cable_name(resolution: ConductorResolution) -> str:
     return resolution.conductor.cable_name
 
 
-def _cable_spec_from_cadata_text(text: str, cable_name: str | None = None) -> CableSpec:
+def _cable_spec_from_cadata_text(
+    text: str,
+    cable_name: str | None = None,
+    *,
+    conductor_name: str | None = None,
+) -> CableSpec:
     lines = text.splitlines()
+    sections: dict[str, list[list[str]]] = {}
+    known_sections = {"INSUL", "CABLE", "CONDUCTOR"}
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^([A-Z][A-Z0-9_]*)\s+(\d+)\s*$", lines[index].strip())
+        if match is None or match.group(1) not in known_sections:
+            index += 1
+            continue
+        section = match.group(1)
+        count = int(match.group(2))
+        rows: list[list[str]] = []
+        index += 1
+        for _ in range(count):
+            if index >= len(lines):
+                raise ValueError(f"{section} section ended before {count} rows were read")
+            rows.append([token.strip("'") for token in re.findall(r"'[^']*'|\S+", lines[index].strip())])
+            index += 1
+        sections[section] = rows
+
+    insulations: dict[str, tuple[float, float]] = {
+        row[1]: (float(row[2]), float(row[3]))
+        for row in sections.get("INSUL", ())
+        if len(row) >= 4
+    }
+    cable_rows = sections.get("CABLE", ())
+    conductor_rows = sections.get("CONDUCTOR", ())
+    conductor_insulation_name: str | None = None
+    if conductor_name is not None:
+        for conductor in conductor_rows:
+            if len(conductor) >= 7 and conductor[1] == conductor_name:
+                if cable_name is not None and conductor[3] != cable_name:
+                    raise ValueError(
+                        f"CONDUCTOR row {conductor_name!r} references CABLE {conductor[3]!r}, not {cable_name!r}"
+                    )
+                cable_name = conductor[3]
+                conductor_insulation_name = conductor[6]
+                break
+        else:
+            raise ValueError(f".cadata file must contain CONDUCTOR row {conductor_name!r}")
+    elif cable_name is not None:
+        for conductor in conductor_rows:
+            if len(conductor) >= 7 and conductor[1] == cable_name:
+                cable_name = conductor[3]
+                conductor_insulation_name = conductor[6]
+                break
+
+    for row in cable_rows:
+        if len(row) >= 5 and (cable_name is None or row[1] == cable_name):
+            height = float(row[2])
+            width_inner = float(row[3])
+            width_outer = float(row[4])
+            insulation_radial, insulation_azimuthal = 0.0, 0.0
+            if conductor_insulation_name is not None:
+                insulation_radial, insulation_azimuthal = insulations.get(conductor_insulation_name, (0.0, 0.0))
+            else:
+                for conductor in conductor_rows:
+                    if len(conductor) >= 7 and conductor[3] == row[1]:
+                        insulation_radial, insulation_azimuthal = insulations.get(conductor[6], (0.0, 0.0))
+                        break
+            return CableSpec(
+                width_inner_mm=width_inner,
+                width_outer_mm=width_outer,
+                height_mm=height,
+                insulation_radial_mm=insulation_radial,
+                insulation_azimuthal_mm=insulation_azimuthal,
+            )
+
     for index, line in enumerate(lines):
         match = re.match(r"^\s*CABLE\s+(\d+)\s*$", line)
         if match is None:
@@ -656,9 +736,9 @@ def _cable_spec_from_cadata_text(text: str, cable_name: str | None = None) -> Ca
                 width_inner = float(tokens[3])
                 width_outer = float(tokens[4])
                 return CableSpec(
-                    width_mm=(width_inner + width_outer) / 2.0,
+                    width_inner_mm=width_inner,
+                    width_outer_mm=width_outer,
                     height_mm=height,
-                    insulation_thickness_mm=0.0,
                 )
     if cable_name is not None:
         raise ValueError(f".cadata file must contain CABLE row {cable_name!r} with dimensions")

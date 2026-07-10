@@ -12,8 +12,20 @@ R_REF_MM = 16.6667
 REFERENCE_FIELD_T = 12.419091
 REFERENCE_MAIN_DIPOLE_UNITS = 10000.0
 
-CTH_HF = CableSpec(width_mm=1.594, height_mm=18.363, insulation_thickness_mm=0.145)
-CTH_LF = CableSpec(width_mm=1.91, height_mm=16.17, insulation_thickness_mm=0.145)
+CTH_HF = CableSpec(
+    width_inner_mm=1.53,
+    width_outer_mm=1.658,
+    height_mm=18.363,
+    insulation_radial_mm=0.145,
+    insulation_azimuthal_mm=0.145,
+)
+CTH_LF = CableSpec(
+    width_inner_mm=1.736,
+    width_outer_mm=2.084,
+    height_mm=16.17,
+    insulation_radial_mm=0.145,
+    insulation_azimuthal_mm=0.145,
+)
 
 BLOCK_TABLE = (
     (1, 4, 25.0, 0.343771, 0.0, CTH_HF, 20),

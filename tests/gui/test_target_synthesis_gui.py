@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import tkinter as tk
+from pathlib import Path
 
 import pytest
 
 from dot.gui import target_synthesis_gui
+
+ROXIE_CTH_CADATA = Path("C:/Users/elisei/Desktop/dipole_designer/roxie_CTH_cables.cadata")
 
 
 class FakeVar:
@@ -149,6 +152,8 @@ CABLE 1
     topology, targets, _ = target_synthesis_gui.App._campaign_inputs(app)
 
     assert topology.cables["layer-1"].width_mm == pytest.approx(1.9)
+    assert topology.cables["layer-1"].width_inner_mm == pytest.approx(1.736)
+    assert topology.cables["layer-1"].width_outer_mm == pytest.approx(2.064)
     assert topology.layers[0].alpha_bounds_deg == pytest.approx((-10.0, 70.0))
     assert targets.cadata_by_layer[0].remfit.c1 == 3.0e9
 
@@ -192,6 +197,10 @@ CONDUCTOR 2
 
     assert topology.cables["layer-1"].width_mm == pytest.approx(2.0)
     assert topology.cables["layer-2"].width_mm == pytest.approx(5.0)
+    assert topology.cables["layer-1"].width_inner_mm == pytest.approx(1.0)
+    assert topology.cables["layer-1"].width_outer_mm == pytest.approx(3.0)
+    assert topology.cables["layer-2"].width_inner_mm == pytest.approx(4.0)
+    assert topology.cables["layer-2"].width_outer_mm == pytest.approx(6.0)
     assert topology.layers[0].alpha_bounds_deg == pytest.approx((-10.0, 70.0))
     assert topology.layers[1].alpha_bounds_deg == pytest.approx((-5.0, 65.0))
     assert targets.max_current_a == pytest.approx(12345.0)
@@ -202,6 +211,32 @@ CONDUCTOR 2
     assert [(item.layer_index, item.reason) for item in targets.excluded_margin_layers] == [
         (0, "unsupported REMFIT type 3 for 'BADFIT'; only type 1 is supported")
     ]
+
+
+def test_cable_spec_from_real_cth_cadata_reads_keystone_and_insulation() -> None:
+    if not ROXIE_CTH_CADATA.exists():
+        pytest.skip(f"ROXIE cable data is unavailable: {ROXIE_CTH_CADATA}")
+    text = ROXIE_CTH_CADATA.read_text(encoding="utf-8")
+
+    hf = target_synthesis_gui._cable_spec_from_cadata_text(
+        text,
+        "CXF150HT5",
+        conductor_name="CTH_HF",
+    )
+    lf = target_synthesis_gui._cable_spec_from_cadata_text(
+        text,
+        "CTH_CERN",
+        conductor_name="CTH_LF",
+    )
+
+    assert hf.width_inner_mm == pytest.approx(1.53)
+    assert hf.width_outer_mm == pytest.approx(1.658)
+    assert hf.insulation_radial_mm == pytest.approx(0.145)
+    assert hf.insulation_azimuthal_mm == pytest.approx(0.145)
+    assert lf.width_inner_mm == pytest.approx(1.736)
+    assert lf.width_outer_mm == pytest.approx(2.084)
+    assert lf.insulation_radial_mm == pytest.approx(0.145)
+    assert lf.insulation_azimuthal_mm == pytest.approx(0.145)
 
 
 def _app_shell():
