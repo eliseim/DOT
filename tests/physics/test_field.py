@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from dot.physics import LineCurrentSource, dipole_mirror_sources, field_at, field_at_explicit_sources
-from dot.physics.field import MU0_OVER_2PI
+from dot.physics import field as field_module
+from dot.physics.field import MU0_OVER_2PI, LineCurrentSourceArray, field_at_many_explicit_sources
 
 
 @pytest.mark.parametrize(
@@ -68,3 +70,22 @@ def test_mirror_orbit_has_normal_dipole_field_symmetry() -> None:
     assert by_mx == pytest.approx(by, rel=1e-12)
     assert by_my == pytest.approx(by, rel=1e-12)
     assert by_both == pytest.approx(by, rel=1e-12)
+
+
+def test_explicit_many_sources_chunking_matches_single_dense_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    n_sources = 257
+    sources = LineCurrentSourceArray.from_arrays(
+        np.linspace(-35.0, 42.0, n_sources),
+        np.linspace(18.0, -27.0, n_sources),
+        np.linspace(100.0, 2500.0, n_sources),
+    )
+    x_probe = np.linspace(-12.0, 14.0, 11)
+    y_probe = np.linspace(9.0, -8.0, 11)
+
+    dense = field_at_many_explicit_sources(sources, x_probe, y_probe)
+
+    monkeypatch.setattr(field_module, "FIELD_DENSE_INTERMEDIATE_LIMIT_BYTES", 5 * 8 * 11 * 17)
+    chunked = field_at_many_explicit_sources(sources, x_probe, y_probe)
+
+    np.testing.assert_allclose(chunked[0], dense[0], rtol=2e-15, atol=1e-15)
+    np.testing.assert_allclose(chunked[1], dense[1], rtol=2e-15, atol=1e-15)
