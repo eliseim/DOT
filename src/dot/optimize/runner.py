@@ -127,11 +127,12 @@ class PhiOrderingRepair(Repair):
 
             radius = float(sample[f"layer_{layer_index}_inner_radius_mm"])
             cable_width = self.topology.cables[layer.cable_id].insulated_width_inner_mm
-            # genome_bounds() already partitions the layer's phi range into
-            # non-overlapping per-block windows in ascending block-index order
-            # (block 0 always gets the lowest sub-window) -- this repair must
-            # match that same ascending convention, not invert it.
-            ordered = sorted(phi_variables, key=lambda item: item.block_index)
+            # genome_bounds() partitions the layer's phi range into per-block
+            # windows with block 0 nearest phi_upper (midplane, where its
+            # hard-fixed alpha=0 is valid) and increasing block index moving
+            # toward phi_lower (the pole). Process from the highest block
+            # index (lowest phi) to block 0 (highest phi) to match.
+            ordered = sorted(phi_variables, key=lambda item: item.block_index, reverse=True)
             # Turns stack from a block's own phi anchor toward increasing phi
             # (see Block.turns()/_arc_stacked_anchor), so the gap required
             # between block i and block i+1 is governed by block i's own
@@ -230,6 +231,65 @@ class TurnBudgetRepair(Repair):
             surplus -= reduction
 
 
+class AlphaAlignmentRepair(Repair):
+    """Clamp each free-alpha block's alpha_deg into a window around its own phi.
+
+    Block index 0 has alpha_deg hard-fixed to 0 (see genome.py), valid
+    because genome_bounds() places it nearest the midplane (phi=90deg).
+    Blocks 1..n-1 have a free alpha gene, but ordinary crossover/mutation
+    treats it as independent of phi -- after mating, a block's phi can be
+    repaired to a very different (more pole-ward) value than the alpha
+    gene was tuned for, leaving alpha badly mismatched and producing
+    self-overlapping turns that no other repair catches (phi-ordering and
+    turn-budget repair don't touch alpha_deg at all).
+
+    A turn's axes rotate with alpha only (see primitives.py's
+    absolute-global-frame alpha convention); they align with the block's
+    true local radial direction (sin(phi), cos(phi)) when
+    alpha = phi - 90. Confirmed empirically (coordinator) against
+    check_turn_non_intersection that alpha at or modestly above that
+    target stays valid across realistic turn counts, while alpha far
+    below it (or too far above, for high turn counts) does not. Clamping
+    into [target, target + 15] (intersected with the block's own
+    alpha_bounds) keeps blocks close to structurally valid without
+    collapsing the alpha gene to a single deterministic value.
+    """
+
+    _WINDOW_ABOVE_TARGET_DEG = 15.0
+
+    def __init__(self, topology: Topology) -> None:
+        super().__init__()
+        self.topology = topology
+        self._variables = genome_variables(topology)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        for sample in x:
+            if not isinstance(sample, dict):
+                continue
+            self._repair_sample(sample)
+        return x
+
+    def _repair_sample(self, sample: dict[str, float | int]) -> None:
+        for variable in self._variables:
+            if (
+                variable.block_index is None
+                or variable.block_index == 0
+                or not variable.name.endswith("_alpha_deg")
+            ):
+                continue
+            phi_name = f"layer_{variable.layer_index}_block_{variable.block_index}_phi_deg"
+            phi = float(sample.get(phi_name, 90.0))
+            target = phi - 90.0
+            lower, upper = variable.bounds
+            window_lower = max(lower, target)
+            window_upper = min(upper, target + self._WINDOW_ABOVE_TARGET_DEG)
+            current = float(sample[variable.name])
+            if window_lower <= window_upper:
+                sample[variable.name] = float(min(max(current, window_lower), window_upper))
+            else:
+                sample[variable.name] = float(min(max(current, lower), upper))
+
+
 class CampaignRepair(Repair):
     """Apply all mixed-variable structural repairs in a fixed sequence.
 
@@ -239,17 +299,20 @@ class CampaignRepair(Repair):
     still geometrically safe (phi gaps computed from an inflated n_turns
     are only overly conservative, never insufficient, since
     TurnBudgetRepair only ever reduces n_turns), but running turn-budget
-    repair first avoids that unnecessary conservatism.
+    repair first avoids that unnecessary conservatism. Alpha-alignment
+    repair runs last since it depends on each block's final phi.
     """
 
     def __init__(self, topology: Topology, feasibility: FeasibilitySettings, targets: OptimizationTargets) -> None:
         super().__init__()
         self._phi_ordering = PhiOrderingRepair(topology, feasibility)
         self._turn_budget = TurnBudgetRepair(topology, targets)
+        self._alpha_alignment = AlphaAlignmentRepair(topology)
 
     def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
         x = self._turn_budget._do(problem, x, **kwargs)
-        return self._phi_ordering._do(problem, x, **kwargs)
+        x = self._phi_ordering._do(problem, x, **kwargs)
+        return self._alpha_alignment._do(problem, x, **kwargs)
 
 
 def run_campaign(
@@ -366,7 +429,9 @@ def _ordered_phi_values(
     min_gap_mm: float,
     rng: np.random.Generator,
 ) -> dict[str, float]:
-    ordered = sorted(phi_variables, key=lambda item: item[1])
+    # See PhiOrderingRepair._repair_sample: block 0 sits nearest phi_upper
+    # (midplane) and increasing block index moves toward phi_lower (pole).
+    ordered = sorted(phi_variables, key=lambda item: item[1], reverse=True)
     # gaps[i] is the gap required after block i (i.e. the transition from
     # block i to block i+1), sized from block i's own n_turns.
     gaps = [

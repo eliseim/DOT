@@ -125,7 +125,10 @@ def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
     random_feasible = _feasible_count(topology, feasibility, random_genomes)
     constructive_feasible = _feasible_count(topology, feasibility, constructive_genomes)
 
-    assert random_feasible == 177
+    # Block 0 now gets the window nearest phi_upper (midplane) instead of
+    # phi_lower (pole); same random draws land in different windows, so the
+    # exact random_feasible count differs from before that fix.
+    assert random_feasible == 182
     assert constructive_feasible == 200
     assert constructive_feasible > random_feasible
 
@@ -197,8 +200,11 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
         feasibility.min_gap_mm,
     )
 
-    assert phis == sorted(phis)
-    assert all(right - left >= min_gap - 1.0e-12 for left, right in zip(phis, phis[1:], strict=False))
+    # Block 0 gets the window nearest phi_upper (midplane, where its
+    # hard-fixed alpha=0 is valid); increasing block index moves toward
+    # phi_lower (the pole).
+    assert phis == sorted(phis, reverse=True)
+    assert all(left - right >= min_gap - 1.0e-12 for left, right in zip(phis, phis[1:], strict=False))
     assert all(
         topology.layers[0].phi_bounds_deg[0] <= phi <= topology.layers[0].phi_bounds_deg[1]
         for phi in phis
