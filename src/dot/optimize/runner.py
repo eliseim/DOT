@@ -139,6 +139,91 @@ class PhiOrderingRepair(Repair):
                 previous = float(sample[variable.name])
 
 
+class TurnBudgetRepair(Repair):
+    """Reduce active turn counts to satisfy structural turn budgets after mating."""
+
+    def __init__(self, topology: Topology, targets: OptimizationTargets) -> None:
+        super().__init__()
+        self.topology = topology
+        self.targets = targets
+        self._variables = genome_variables(topology)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        for sample in x:
+            if not isinstance(sample, dict):
+                continue
+            self._repair_sample(sample)
+        return x
+
+    def _repair_sample(self, sample: dict[str, float | int]) -> None:
+        if self.targets.max_total_turns is None and self.targets.max_turns_per_layer is None:
+            return
+
+        by_layer = self._active_turn_variables(sample)
+        if self.targets.max_turns_per_layer is not None:
+            for turn_variables in by_layer.values():
+                self._reduce_to_budget(sample, turn_variables, self.targets.max_turns_per_layer)
+
+        if self.targets.max_total_turns is not None:
+            all_turn_variables = [
+                variable
+                for layer_variables in by_layer.values()
+                for variable in layer_variables
+            ]
+            self._reduce_to_budget(sample, all_turn_variables, self.targets.max_total_turns)
+
+    def _active_turn_variables(
+        self,
+        sample: dict[str, float | int],
+    ) -> dict[int, list[tuple[str, int, float]]]:
+        by_layer: dict[int, list[tuple[str, int, float]]] = {}
+        for variable in self._variables:
+            if (
+                variable.block_index is None
+                or not variable.name.endswith("_n_turns")
+                or not _block_is_active(sample, variable.layer_index, variable.block_index)
+            ):
+                continue
+            lower, _upper = variable.bounds
+            by_layer.setdefault(variable.layer_index, []).append(
+                (variable.name, variable.block_index, lower)
+            )
+        return by_layer
+
+    @staticmethod
+    def _reduce_to_budget(
+        sample: dict[str, float | int],
+        turn_variables: list[tuple[str, int, float]],
+        budget: int,
+    ) -> None:
+        surplus = sum(int(round(float(sample[name]))) for name, _block_index, _lower in turn_variables) - budget
+        while surplus > 0:
+            reducible = [
+                (int(round(float(sample[name]))), block_index, name, int(round(lower)))
+                for name, block_index, lower in turn_variables
+                if int(round(float(sample[name]))) > int(round(lower))
+            ]
+            if not reducible:
+                return
+            current, _block_index, name, lower = max(reducible)
+            reduction = min(surplus, current - lower)
+            sample[name] = current - reduction
+            surplus -= reduction
+
+
+class CampaignRepair(Repair):
+    """Apply all mixed-variable structural repairs in a fixed sequence."""
+
+    def __init__(self, topology: Topology, feasibility: FeasibilitySettings, targets: OptimizationTargets) -> None:
+        super().__init__()
+        self._phi_ordering = PhiOrderingRepair(topology, feasibility)
+        self._turn_budget = TurnBudgetRepair(topology, targets)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        x = self._phi_ordering._do(problem, x, **kwargs)
+        return self._turn_budget._do(problem, x, **kwargs)
+
+
 def run_campaign(
     topology: Topology,
     targets: OptimizationTargets,
@@ -150,7 +235,7 @@ def run_campaign(
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
     problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
-    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets)
     result = minimize(
         problem,
         algorithm,
@@ -185,12 +270,21 @@ def _mixed_variable_nsga2(
     topology: Topology,
     feasibility: FeasibilitySettings,
     pop_size: int,
+    targets: OptimizationTargets | None = None,
 ) -> NSGA2:
     # pymoo's default duplicate elimination converts X to a float array, which
     # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
     # has a mixed-genome duplicate comparator.
     duplicate_elimination = NoDuplicateElimination()
-    repair = PhiOrderingRepair(topology, feasibility)
+    if targets is None:
+        targets = OptimizationTargets(
+            target_bore_field_t=0.0,
+            r_ref_mm=0.0,
+            max_order=1,
+            cadata_by_layer=(),
+            temperature_k=0.0,
+        )
+    repair = CampaignRepair(topology, feasibility, targets)
     return NSGA2(
         pop_size=pop_size,
         sampling=ConstructiveMixedVariableSampling(topology, feasibility),

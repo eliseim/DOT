@@ -20,6 +20,7 @@ from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion,
 from dot.optimize.runner import (
     ConstructiveMixedVariableSampling,
     PhiOrderingRepair,
+    TurnBudgetRepair,
     _mixed_variable_nsga2,
     _minimum_phi_gap_deg,
     run_campaign,
@@ -204,6 +205,65 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
     )
 
 
+def test_turn_budget_repair_reduces_largest_active_turn_counts_first() -> None:
+    topology = _turn_budget_topology()
+    targets = _targets(max_total_turns=7, max_turns_per_layer=4)
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 10.0,
+        "layer_0_block_0_n_turns": 5,
+        "layer_0_block_1_phi_deg": 30.0,
+        "layer_0_block_1_n_turns": 4,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_1_inner_radius_mm": 24.0,
+        "layer_1_block_0_phi_deg": 20.0,
+        "layer_1_block_0_n_turns": 4,
+        "layer_1_block_1_phi_deg": 40.0,
+        "layer_1_block_1_n_turns": 5,
+        "layer_1_block_1_active": False,
+        "layer_1_block_1_alpha_deg": 0.0,
+    }
+
+    repaired = TurnBudgetRepair(topology, targets)._do(None, np.asarray([sample], dtype=object))[0]
+
+    assert repaired["layer_0_block_0_n_turns"] == 1
+    assert repaired["layer_0_block_1_n_turns"] == 3
+    assert repaired["layer_1_block_0_n_turns"] == 3
+    assert repaired["layer_1_block_1_n_turns"] == 5
+    assert _active_turn_total(repaired, topology) == 7
+    assert _active_layer_turn_totals(repaired, topology) == [4, 3]
+
+
+def test_turn_budget_repair_respects_lower_bounds_when_budget_is_impossible() -> None:
+    topology = _turn_budget_topology(n_turns_bounds=(2, 5))
+    targets = _targets(max_total_turns=3, max_turns_per_layer=3)
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 10.0,
+        "layer_0_block_0_n_turns": 5,
+        "layer_0_block_1_phi_deg": 30.0,
+        "layer_0_block_1_n_turns": 5,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_1_inner_radius_mm": 24.0,
+        "layer_1_block_0_phi_deg": 20.0,
+        "layer_1_block_0_n_turns": 5,
+        "layer_1_block_1_phi_deg": 40.0,
+        "layer_1_block_1_n_turns": 5,
+        "layer_1_block_1_active": False,
+        "layer_1_block_1_alpha_deg": 0.0,
+    }
+
+    repaired = TurnBudgetRepair(topology, targets)._do(None, np.asarray([sample], dtype=object))[0]
+
+    assert repaired["layer_0_block_0_n_turns"] == 2
+    assert repaired["layer_0_block_1_n_turns"] == 2
+    assert repaired["layer_1_block_0_n_turns"] == 2
+    assert repaired["layer_1_block_1_n_turns"] == 5
+    assert _active_turn_total(repaired, topology) == 6
+
+
 def _topology() -> Topology:
     cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
     return Topology(
@@ -278,13 +338,45 @@ def _tight_four_block_topology() -> Topology:
     )
 
 
-def _targets() -> OptimizationTargets:
+def _turn_budget_topology(n_turns_bounds: tuple[int, int] = (1, 5)) -> Topology:
+    cable = CableSpec(width_mm=0.2, height_mm=0.2, insulation_thickness_mm=0.0)
+    return Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=2,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(10.0, 50.0),
+                n_turns_bounds=n_turns_bounds,
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+            LayerTopology(
+                cable_id="outer",
+                n_blocks=2,
+                inner_radius_bounds_mm=(24.0, 24.0),
+                phi_bounds_deg=(20.0, 60.0),
+                n_turns_bounds=n_turns_bounds,
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable, "outer": cable},
+    )
+
+
+def _targets(
+    *,
+    max_total_turns: int | None = None,
+    max_turns_per_layer: int | None = None,
+) -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.01,
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(conductor_data(),),
         temperature_k=0.0,
+        max_total_turns=max_total_turns,
+        max_turns_per_layer=max_turns_per_layer,
     )
 
 
@@ -327,6 +419,22 @@ def _feasible_count(
         )
         feasible += int(result.is_feasible)
     return feasible
+
+
+def _active_turn_total(sample: dict[str, float | int], topology: Topology) -> int:
+    return sum(_active_layer_turn_totals(sample, topology))
+
+
+def _active_layer_turn_totals(sample: dict[str, float | int], topology: Topology) -> list[int]:
+    totals: list[int] = []
+    for layer_index, layer in enumerate(topology.layers):
+        total = 0
+        for block_index in range(layer.n_blocks):
+            if block_index > 0 and not sample[f"layer_{layer_index}_block_{block_index}_active"]:
+                continue
+            total += int(sample[f"layer_{layer_index}_block_{block_index}_n_turns"])
+        totals.append(total)
+    return totals
 
 
 def conductor_data() -> LayerConductorData:
