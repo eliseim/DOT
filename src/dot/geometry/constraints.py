@@ -284,6 +284,13 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
     return violations
 
 
+#: dipole_designer's C7a electrical-insulation inter-block gap minimum (mm).
+ELECTRICAL_GAP_MIN_MM = 0.10
+
+#: dipole_designer's C7b manufacturability wedge inter-block gap minimum (mm).
+WEDGE_GAP_MIN_MM = 1.0
+
+
 def check_inter_block_gap(
     design: DipoleDesign,
     min_gap_mm: float,
@@ -293,13 +300,34 @@ def check_inter_block_gap(
     ``check_turn_non_intersection`` only rejects actual positive-area
     overlap (gap < 0); it says nothing about two blocks close enough that
     there is no physical room for the insulation/wedge between them. This
-    is the counterpart to dipole_designer's C7 (electrical/wedge
-    inter-block gap) -- a minimum *positive* clearance, checked only
+    is a general-purpose counterpart to dipole_designer's C7 (electrical/
+    wedge inter-block gap) -- a minimum *positive* clearance, checked only
     between turns of different blocks within the same layer (turns in
     different layers are already governed by
-    :func:`check_inter_layer_spacing`).
+    :func:`check_inter_layer_spacing`). See :func:`check_electrical_gap`
+    and :func:`check_wedge_gap` for dd's exact two-tier thresholds.
     """
 
+    return _inter_block_gap_violations(design, min_gap_mm, "inter_block_gap")
+
+
+def check_electrical_gap(design: DipoleDesign, min_gap_mm: float = ELECTRICAL_GAP_MIN_MM) -> list[Violation]:
+    """dd's C7a: minimum electrical-insulation gap between adjacent blocks."""
+
+    return _inter_block_gap_violations(design, min_gap_mm, "electrical_gap")
+
+
+def check_wedge_gap(design: DipoleDesign, min_gap_mm: float = WEDGE_GAP_MIN_MM) -> list[Violation]:
+    """dd's C7b: minimum manufacturability wedge gap between adjacent blocks."""
+
+    return _inter_block_gap_violations(design, min_gap_mm, "wedge_gap")
+
+
+def _inter_block_gap_violations(
+    design: DipoleDesign,
+    min_gap_mm: float,
+    constraint_name: str,
+) -> list[Violation]:
     violations: list[Violation] = []
     turns = tuple(_iter_indexed_turns(design))
     for left_index, left in enumerate(turns):
@@ -312,7 +340,7 @@ def check_inter_block_gap(
             if gap < min_gap_mm - _EPSILON:
                 violations.append(
                     Violation(
-                        constraint_name="inter_block_gap",
+                        constraint_name=constraint_name,
                         message=(
                             f"Inter-block clearance {gap:.6g} mm is below required "
                             f"{min_gap_mm:.6g} mm: "
@@ -335,23 +363,40 @@ def check_pole_angle_limit(
     design: DipoleDesign,
     max_angle_deg: float | Sequence[float],
 ) -> list[Violation]:
-    """Check no turn outer edge exceeds the angular winding limit from the pole."""
+    """Check no turn vertex winds closer to the pole than the configured margin.
+
+    ``max_angle_deg`` is dipole_designer's C17 pole-edge angle limit,
+    expressed in *dd's* phi convention (angle from the midplane, capped at
+    e.g. 80deg for layer 1 -- i.e. no conductor may wind closer than
+    ``90 - max_angle_deg`` degrees from the true pole). DOT's own phi
+    convention is the complement (angle from the pole, via
+    ``_angle_from_y_axis_deg``), so the corresponding DOT-side requirement
+    is a *minimum* angle-from-pole of ``90 - max_angle_deg`` for every
+    vertex -- not a maximum, which is what this function checked before
+    (confirmed backwards: the real, ROXIE-verified CTH-14T design's own
+    midplane block naturally reaches ~89.8deg from the pole, which the old
+    "maximum" formulation would incorrectly reject at any limit below 90;
+    the corrected minimum-margin-from-pole formulation correctly accepts
+    it, since CTH-14T's actual closest-to-pole vertex is ~15.19deg, well
+    clear of the required 90-80=10deg minimum).
+    """
 
     limits = _max_angle_by_layer(design, max_angle_deg)
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
         layer_limit = limits[indexed.layer_index]
-        outer_edge = indexed.turn.corners[2], indexed.turn.corners[3]
-        max_outer_angle = max(_angle_from_y_axis_deg(point) for point in outer_edge)
-        if max_outer_angle > layer_limit + _EPSILON:
+        required_min_angle = 90.0 - layer_limit
+        min_vertex_angle = min(_angle_from_y_axis_deg(point) for point in indexed.turn.corners)
+        if min_vertex_angle < required_min_angle - _EPSILON:
             violations.append(
                 Violation(
                     constraint_name="pole_angle_limit",
                     message=(
-                        f"Turn outer edge angle {max_outer_angle:.6g} deg "
-                        f"exceeds limit {layer_limit:.6g} deg."
+                        f"Turn vertex angle {min_vertex_angle:.6g} deg from the pole is "
+                        f"below the required minimum {required_min_angle:.6g} deg "
+                        f"(pole-edge limit {layer_limit:.6g} deg)."
                     ),
-                    severity=max_outer_angle - layer_limit,
+                    severity=required_min_angle - min_vertex_angle,
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
                     turn_index=indexed.turn_index,

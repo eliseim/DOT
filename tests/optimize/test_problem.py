@@ -246,7 +246,10 @@ def _targets(
 
 
 def _feasibility() -> FeasibilitySettings:
-    return FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=80.0)
+    # max_angle_deg=90 is a no-op for the (corrected, minimum-from-pole)
+    # pole_angle_limit check -- these tests exercise other constraints
+    # (turn budget, current cap), not pole-angle specifically.
+    return FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
 
 
 def conductor_data() -> LayerConductorData:

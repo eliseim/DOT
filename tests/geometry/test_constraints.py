@@ -347,16 +347,29 @@ def test_turn_non_intersection_rejects_positive_area_polygon_overlap() -> None:
     assert violations[0].severity > 0.0
 
 
-def test_pole_angle_limit_accepts_outer_edge_below_limit() -> None:
-    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=20.0)
+def test_pole_angle_limit_accepts_vertex_safely_clear_of_pole() -> None:
+    # DOT's phi convention: 0=pole, 90=midplane. max_angle_deg is dd's C17
+    # pole-edge limit (angle from midplane) -- the DOT-side requirement is
+    # a *minimum* angle-from-pole of 90-max_angle_deg. A turn whose
+    # nearest-to-pole vertex is at 60deg clears a 40deg minimum
+    # (max_angle_deg=50).
+    design = DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(62.0)),)),),
+    )
 
-    assert check_pole_angle_limit(design, max_angle_deg=33.0) == []
+    assert check_pole_angle_limit(design, max_angle_deg=50.0) == []
 
 
-def test_pole_angle_limit_rejects_outer_edge_above_limit() -> None:
-    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=40.0)
+def test_pole_angle_limit_rejects_vertex_too_close_to_pole() -> None:
+    # Nearest-to-pole vertex at 8deg does not clear the required 10deg
+    # minimum (max_angle_deg=80, matching the CTH layer-1 spec value).
+    design = DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(10.0)),)),),
+    )
 
-    violations = check_pole_angle_limit(design, max_angle_deg=30.0)
+    violations = check_pole_angle_limit(design, max_angle_deg=80.0)
 
     assert [violation.constraint_name for violation in violations] == ["pole_angle_limit"]
     assert violations[0].layer_index == 0
@@ -369,13 +382,17 @@ def test_pole_angle_limit_applies_per_layer_limits() -> None:
     design = DipoleDesign(
         aperture_radius_mm=8.0,
         layers=(
-            Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(82.0)),)),
-            Layer(inner_radius_mm=14.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(84.0)),)),
+            Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(10.0)),)),
+            Layer(inner_radius_mm=14.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(50.0)),)),
         ),
     )
 
+    # Layer 0's nearest-to-pole vertex (8deg) clears a lenient 5deg
+    # minimum (max_angle_deg=85); layer 1's (48deg) clears it easily too.
     assert check_pole_angle_limit(design, max_angle_deg=85.0) == []
 
+    # Layer 0's required minimum becomes 90-80=10deg -- its 8deg vertex
+    # violates; layer 1's required minimum stays 90-85=5deg -- still fine.
     violations = check_pole_angle_limit(design, max_angle_deg=(80.0, 85.0))
 
     assert [violation.constraint_name for violation in violations] == ["pole_angle_limit"]
@@ -388,11 +405,14 @@ def test_pole_angle_limit_rejects_per_layer_length_mismatch() -> None:
 
 
 def test_check_feasibility_accepts_valid_hand_constructed_design() -> None:
+    # max_angle_deg=90 is a no-op for the (corrected, minimum-from-pole)
+    # pole_angle_limit check -- this test exercises the other constraints,
+    # not pole-angle specifically.
     result = check_feasibility(
         _valid_two_layer_design(),
         aperture_radius_mm=8.0,
         min_gap_mm=1.0,
-        max_angle_deg=45.0,
+        max_angle_deg=90.0,
     )
 
     assert result.is_feasible is True
