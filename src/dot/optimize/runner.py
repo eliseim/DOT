@@ -467,6 +467,34 @@ class CampaignRepair(Repair):
         return self._ground_truth._do(problem, x, **kwargs)
 
 
+def refresh_population_admission(problem: DipoleOptimizationProblem, pop) -> None:  # noqa: ANN001
+    """Re-score a pymoo population's cached F/G against the problem's current
+    admission thresholds.
+
+    ``DipoleOptimizationProblem.admission_thresholds()`` anneals the
+    harmonic/margin/current thresholds by generation (task 0023), but pymoo's
+    NSGA2 never re-evaluates a surviving individual's cached F/G once it is
+    born -- only new offspring are scored under the current generation's
+    threshold. Elitist survival then retains individuals whose G reflects a
+    much looser threshold from whenever they were born, never re-validated
+    against the tightening target: confirmed empirically (task 0042) via a
+    campaign whose final "feasible" individuals had G<=0 (so counted as
+    feasible) while their actual harmonic/margin values were 5-6x off the
+    final target. Calling this once per generation, right after
+    ``problem.set_generation()``, keeps every individual entering the next
+    generation's mating/survival scored under the threshold that is
+    currently active, both for honest reporting and for correct
+    constraint-domination-based selection pressure.
+    """
+
+    x = pop.get("X")
+    if x is None or len(x) == 0:
+        return
+    objectives, constraints = problem.evaluate(x, return_values_of=["F", "G"])
+    pop.set("F", objectives)
+    pop.set("G", constraints)
+
+
 def run_campaign(
     topology: Topology,
     targets: OptimizationTargets,
@@ -479,12 +507,17 @@ def run_campaign(
 
     problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
     algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets)
+
+    def _advance_generation(algorithm) -> None:  # noqa: ANN001
+        problem.set_generation(algorithm.n_gen)
+        refresh_population_admission(problem, algorithm.pop)
+
     result = minimize(
         problem,
         algorithm,
         ("n_gen", n_gen),
         seed=seed,
-        callback=lambda algorithm: problem.set_generation(algorithm.n_gen),
+        callback=_advance_generation,
         verbose=False,
     )
 
