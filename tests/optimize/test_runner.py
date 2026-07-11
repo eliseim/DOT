@@ -21,6 +21,7 @@ from dot.optimize import (
 from dot.optimize.genome import flatten_mixed_genome, genome_variables
 from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.optimize.runner import (
+    AdaptiveOffspringMating,
     ConstructiveMixedVariableSampling,
     GroundTruthRepair,
     LayerNestingRepair,
@@ -215,6 +216,21 @@ def _design_violates_nesting(topology: Topology, sample: dict[str, float | int])
     genome = flatten_mixed_genome(sample, topology)
     design = decode(genome, topology, topology.cables)
     return any(v.layer_index == 1 for v in check_layer_nesting(design))
+
+
+def test_run_campaign_with_adaptive_offspring_still_produces_candidates() -> None:
+    topology = _topology()
+    result = run_campaign(
+        topology,
+        _targets(),
+        _feasibility(),
+        pop_size=8,
+        n_gen=3,
+        seed=7,
+        adaptive_offspring=True,
+    )
+
+    assert result.candidates
 
 
 def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
@@ -422,6 +438,112 @@ def test_phi_ordering_repair_spreads_slack_instead_of_pinning_to_window_floor() 
     sorted_phis = sorted(phis)
     gaps = [right - left for left, right in zip(sorted_phis, sorted_phis[1:], strict=False)]
     assert min(gaps) > 0.5 * max(gaps), f"gaps are unevenly concentrated: {gaps}"
+
+
+class _StubMating:
+    """Deterministic stand-in for MixedVariableMating.do() -- returns the
+    next sample dict from a fixed sequence, repeating the last entry once
+    the sequence is exhausted (mirrors always-infeasible mating output)."""
+
+    def __init__(self, sequence: list[dict[str, float | int]]) -> None:
+        self._sequence = sequence
+        self.calls = 0
+
+    def do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
+        sample = self._sequence[min(self.calls, len(self._sequence) - 1)]
+        self.calls += 1
+        return Population.new(X=[dict(sample)])
+
+
+def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() -> None:
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    sampling = ConstructiveMixedVariableSampling(topology, feasibility)
+
+    infeasible_sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 40.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 40.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 40.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": True,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 40.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": True,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+    feasible_sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 74.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 55.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 32.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": True,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 8.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": True,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+    adaptive = AdaptiveOffspringMating(topology, feasibility, _StubMating([infeasible_sample]), sampling)
+    assert not adaptive._is_valid(infeasible_sample), "test fixture must actually be infeasible"
+
+    # First .do() call returns the always-infeasible sample; local
+    # re-mutation retries hit the same stub (still infeasible, since the
+    # stub ignores retries and always returns its one queued sample), so
+    # the regeneration must fall through to the constructive-sampler
+    # fallback, which is feasibility-aware by construction.
+    pop = sampling.do(None, 1)
+    off = adaptive.do(None, pop, 1)
+
+    assert len(off) == 1
+    assert adaptive._is_valid(off[0].get("X"))
+    assert adaptive.valid_fraction_history == [1.0]
+
+
+def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(monkeypatch) -> None:  # noqa: ANN001
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    sampling = ConstructiveMixedVariableSampling(topology, feasibility)
+
+    infeasible_sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 40.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 40.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 40.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": True,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 40.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": True,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+    adaptive = AdaptiveOffspringMating(topology, feasibility, _StubMating([infeasible_sample]), sampling)
+    # Force even the fallback constructive sampler to hand back the same
+    # infeasible sample, so no retry path can ever succeed -- this must
+    # not crash, and must still return a full-size, consumable offspring
+    # population (never silently drop offspring).
+    monkeypatch.setattr(sampling, "do", lambda problem, n, random_state=None: Population.new(X=[dict(infeasible_sample)]))
+
+    pop = Population.new(X=[dict(infeasible_sample)])
+    off = adaptive.do(None, pop, 1)
+
+    assert len(off) == 1
+    assert adaptive.valid_fraction_history == [0.0]
 
 
 def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.duplicate import NoDuplicateElimination
+from pymoo.core.infill import InfillCriterion
 from pymoo.core.mixed import MixedVariableMating
 from pymoo.core.repair import Repair
 from pymoo.core.sampling import Sampling
@@ -645,11 +646,12 @@ def run_campaign(
     n_gen: int = 3,
     seed: int | None = None,
     topology_survival: TopologySurvivalConfig | None = None,
+    adaptive_offspring: bool = False,
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
     problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
-    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets, topology_survival)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets, topology_survival, adaptive_offspring)
 
     def _advance_generation(algorithm) -> None:  # noqa: ANN001
         problem.set_generation(algorithm.n_gen)
@@ -685,12 +687,111 @@ def run_campaign(
     )
 
 
+class AdaptiveOffspringMating(InfillCriterion):
+    """Wrap ``MixedVariableMating`` with a cheap post-hoc validity retry (task 0047).
+
+    Narrower than dipole_designer's own offspring-regeneration mechanism,
+    whose main goal is reducing live-ROXIE call cost -- not DOT's
+    bottleneck, since DOT's search never calls live ROXIE per-candidate.
+    What's worth porting is the cheap pre-validity retry loop: after the
+    wrapped mating (which already runs ``CampaignRepair``) produces
+    offspring, check each one against real ``check_feasibility``; for any
+    still infeasible, retry in bounded priority order -- first a fresh
+    mating draw from the same parent pool (giving ``CampaignRepair``
+    another attempt at a different random genome), then fall back to a
+    feasibility-aware individual from the existing constructive sampler
+    (reusing existing code rather than inventing a new retry taxonomy).
+    Tracks the per-generation valid-offspring fraction for diagnostics;
+    true mutation-strength modulation (dipole_designer's adaptive 0.2-1.0
+    scale) is deferred to a follow-up task rather than forcing a fragile
+    hook into pymoo's per-variable-kind operator internals.
+    """
+
+    def __init__(
+        self,
+        topology: Topology,
+        feasibility: FeasibilitySettings,
+        mating: MixedVariableMating,
+        sampling: Sampling,
+        max_regeneration_attempts: int = 3,
+    ) -> None:
+        super().__init__()
+        self.topology = topology
+        self.feasibility = feasibility
+        self.mating = mating
+        self.sampling = sampling
+        self.max_regeneration_attempts = max_regeneration_attempts
+        self.valid_fraction_history: list[float] = []
+
+    def do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
+        off = self.mating.do(problem, pop, n_offsprings, random_state=random_state, **kwargs)
+        total = len(off)
+        if total == 0:
+            return off
+
+        valid_flags = [self._is_valid(individual.get("X")) for individual in off]
+        for index, is_valid in enumerate(valid_flags):
+            if is_valid:
+                continue
+            replacement = self._regenerate(problem, pop, random_state, **kwargs)
+            if replacement is not None:
+                off[index].set("X", replacement)
+                # Re-check rather than assume: the fallback constructive
+                # sampler is feasibility-aware in practice, but nothing
+                # guarantees it here -- an unconditional True would report
+                # a false "fully valid" generation even if regeneration
+                # produced something still infeasible.
+                valid_flags[index] = self._is_valid(replacement)
+
+        self.valid_fraction_history.append(sum(valid_flags) / total)
+        return off
+
+    def _do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
+        # Required by InfillCriterion's abstract interface, but this class
+        # overrides do() directly rather than relying on the base
+        # do()->_do() flow (it needs to inspect and retry the WHOLE batch
+        # produced by the wrapped mating, not build offspring one call at
+        # a time), so this is never actually invoked.
+        return self.mating._do(problem, pop, n_offsprings, random_state=random_state, **kwargs)
+
+    def _is_valid(self, sample) -> bool:  # noqa: ANN001
+        if not isinstance(sample, dict):
+            return True
+        try:
+            genome = flatten_mixed_genome(sample, self.topology)
+            design = decode(genome, self.topology, self.topology.cables)
+            result = check_feasibility(
+                design,
+                aperture_radius_mm=self.topology.aperture_radius_mm,
+                min_gap_mm=self.feasibility.min_gap_mm,
+                max_angle_deg=self.feasibility.max_angle_deg,
+                min_layer_clearance_mm=self.feasibility.min_layer_clearance_mm,
+                min_pole_gap_mm=self.feasibility.min_pole_gap_mm,
+                min_inter_block_gap_mm=self.feasibility.min_inter_block_gap_mm,
+                enforce_layer_nesting=self.feasibility.enforce_layer_nesting,
+            )
+            return result.is_feasible
+        except (KeyError, ValueError, ZeroDivisionError):
+            return False
+
+    def _regenerate(self, problem, pop, random_state, **kwargs):  # noqa: ANN001, ANN003
+        for _ in range(self.max_regeneration_attempts):
+            retry = self.mating.do(problem, pop, 1, random_state=random_state, **kwargs)
+            if len(retry) and self._is_valid(retry[0].get("X")):
+                return retry[0].get("X")
+        fallback = self.sampling.do(problem, 1, random_state=random_state)
+        if len(fallback):
+            return fallback[0].get("X")
+        return None
+
+
 def _mixed_variable_nsga2(
     topology: Topology,
     feasibility: FeasibilitySettings,
     pop_size: int,
     targets: OptimizationTargets | None = None,
     topology_survival: TopologySurvivalConfig | None = None,
+    adaptive_offspring: bool = False,
 ) -> NSGA2:
     # pymoo's default duplicate elimination converts X to a float array, which
     # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
@@ -706,10 +807,14 @@ def _mixed_variable_nsga2(
         )
     repair = CampaignRepair(topology, feasibility, targets)
     survival = TopologyAwareRankAndCrowding(topology_survival or TopologySurvivalConfig())
+    sampling = ConstructiveMixedVariableSampling(topology, feasibility)
+    mating: InfillCriterion = MixedVariableMating(repair=repair, eliminate_duplicates=duplicate_elimination)
+    if adaptive_offspring:
+        mating = AdaptiveOffspringMating(topology, feasibility, mating, sampling)
     return NSGA2(
         pop_size=pop_size,
-        sampling=ConstructiveMixedVariableSampling(topology, feasibility),
-        mating=MixedVariableMating(repair=repair, eliminate_duplicates=duplicate_elimination),
+        sampling=sampling,
+        mating=mating,
         eliminate_duplicates=duplicate_elimination,
         survival=survival,
     )
