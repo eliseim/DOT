@@ -55,6 +55,41 @@ def test_problem_accepts_feasible_genome() -> None:
     assert f_values[1] < 0.0
 
 
+def test_problem_compares_harmonic_constraint_without_erroneous_1e4_rescale() -> None:
+    # field_quality_objective's raw return value is already in CERN/European
+    # relative "units" (multipole_coefficients' own docstring: "multiplied
+    # by 1e4 -- b_1 is 10000 for a normal dipole"). Confirmed against the
+    # real CTH-14T design: its field_quality_objective is ~2.0, sensibly
+    # comparable to a target like 5.0 units. A prior version of this code
+    # divided the target by 1e4 before comparing, making the threshold
+    # ~10000x too strict (effectively unsatisfiable by any real design).
+    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0])
+    baseline_problem = DipoleOptimizationProblem(_topology(), _targets(), _feasibility())
+    f_values = baseline_problem.evaluate(feasible_genome, return_values_of=["F"])
+    field_quality = float(f_values[0])
+    assert field_quality > 0.0, "test needs a genome with nonzero harmonic content to be meaningful"
+
+    lenient_problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_harmonic_units=field_quality * 10.0),
+        _feasibility(),
+        total_generations=1,
+    )
+    lenient_problem.set_generation(1)
+    lenient_g = lenient_problem.evaluate(feasible_genome, return_values_of=["G"])
+    assert np.all(lenient_g <= 0.0), "a threshold well above the actual field quality must admit it"
+
+    strict_problem = DipoleOptimizationProblem(
+        _topology(),
+        _targets(max_harmonic_units=field_quality / 10.0),
+        _feasibility(),
+        total_generations=1,
+    )
+    strict_problem.set_generation(1)
+    strict_g = strict_problem.evaluate(feasible_genome, return_values_of=["G"])
+    assert np.any(strict_g > 0.0), "a threshold well below the actual field quality must reject it"
+
+
 def test_problem_anneals_target_admission_thresholds_to_final_targets() -> None:
     targets = _targets(max_harmonic_units=10.0, min_margin_percent=15.0, max_current_a=13000.0)
     problem = DipoleOptimizationProblem(
