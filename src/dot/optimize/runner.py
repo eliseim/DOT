@@ -148,17 +148,35 @@ class PhiOrderingRepair(Repair):
                 )
                 for variable in ordered
             ]
-            sorted_phis = sorted(float(sample[variable.name]) for variable in phi_variables)
-            previous = -math.inf
-            for remaining_index, variable in enumerate(ordered):
+            # Slack-packing construction (task 0046, replaces a prior
+            # greedy floor-clamp): a greedy clamp assigns each block the
+            # smallest value that satisfies ordering/gaps against the
+            # previous block, so any block whose proposed value doesn't
+            # already clear that floor snaps to EXACTLY its own window's
+            # lower bound -- using none of that window's interior, no
+            # matter how wide it is (confirmed empirically: a fully
+            # collapsed sample repairs to every block sitting at its
+            # window's lower edge). Only the last-processed block (block 0)
+            # could ever use its own window's interior, so any slack in the
+            # layer's phi range concentrated there instead of spreading
+            # across all blocks -- a quiet, systematic bias in exactly the
+            # gene that gates C2/C4/C5/C10/C19. Instead, distribute the
+            # layer's total slack (available span minus required gaps)
+            # evenly across every block's position, ignoring each block's
+            # individually-proposed value entirely: this is a
+            # reconstruction, consistent with how DOT's other repairs
+            # (TurnBudgetRepair, GroundTruthRepair) already rebuild rather
+            # than minimally nudge.
+            total_required_gap = sum(gaps[:-1])
+            available_span = ordered[-1].bounds[1] - ordered[0].bounds[0]
+            slack = max(0.0, available_span - total_required_gap)
+            slack_share = slack / len(ordered)
+            position = ordered[0].bounds[0]
+            for index, variable in enumerate(ordered):
+                position += slack_share if index == 0 else gaps[index - 1] + slack_share
                 lower, upper = variable.bounds
-                required_gap = gaps[remaining_index - 1] if remaining_index > 0 else 0.0
-                remaining_gap_sum = sum(gaps[remaining_index : len(ordered) - 1])
-                max_phi = upper - remaining_gap_sum
-                repaired = max(lower, previous + required_gap, sorted_phis[remaining_index])
-                repaired = min(max_phi, repaired)
-                sample[variable.name] = float(min(max(repaired, lower), upper))
-                previous = float(sample[variable.name])
+                position = float(min(max(position, lower), upper))
+                sample[variable.name] = position
 
 
 class LayerNestingRepair(Repair):
