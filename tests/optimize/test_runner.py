@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from pymoo.core.population import Population
@@ -16,7 +18,7 @@ from dot.optimize import (
     genome_bounds,
     load_line_margin_objective,
 )
-from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
+from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.optimize.runner import (
     ConstructiveMixedVariableSampling,
     GroundTruthRepair,
@@ -24,6 +26,7 @@ from dot.optimize.runner import (
     TurnBudgetRepair,
     _mixed_variable_nsga2,
     _minimum_phi_gap_deg,
+    refresh_population_admission,
     run_campaign,
 )
 
@@ -60,6 +63,42 @@ def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -
 
     assert candidate.objectives[0] == pytest.approx(field_quality, rel=1.0e-12)
     assert candidate.objectives[1] == pytest.approx(-margin, rel=1.0e-12)
+
+
+def test_refresh_population_admission_rescoring_reflects_current_threshold() -> None:
+    # admission_thresholds() anneals the harmonic threshold from a loose
+    # start (10x the final target) down to the final target as generations
+    # progress. An individual accepted as feasible under the loose,
+    # early-generation threshold must be correctly re-flagged infeasible
+    # once refresh_population_admission() re-scores it against a later,
+    # stricter generation's threshold -- otherwise it survives NSGA2's
+    # elitist selection forever on stale G (task 0042).
+    topology = _topology()
+    baseline = run_campaign(topology, _targets(), _feasibility(), pop_size=8, n_gen=3, seed=11)
+    assert baseline.candidates
+    genome = baseline.candidates[0].genome
+    raw_field_quality = baseline.candidates[0].objectives[0]
+    assert raw_field_quality > 0.0
+
+    total_generations = 10
+    target = raw_field_quality / 2.0
+    targets_with_harmonic = replace(_targets(), max_harmonic_units=target)
+    problem = DipoleOptimizationProblem(
+        topology, targets_with_harmonic, _feasibility(), total_generations=total_generations
+    )
+
+    problem.set_generation(1)
+    f1, g1 = problem.evaluate(genome, return_values_of=["F", "G"])
+    assert np.all(np.atleast_1d(g1) <= 0.0)
+
+    pop = Population.new(X=np.atleast_2d(genome))
+    pop.set("F", np.atleast_2d(f1))
+    pop.set("G", np.atleast_2d(g1))
+
+    problem.set_generation(total_generations)
+    refresh_population_admission(problem, pop)
+
+    assert np.any(pop.get("G") > 0.0)
 
 
 def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
