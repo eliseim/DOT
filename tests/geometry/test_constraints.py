@@ -8,6 +8,7 @@ from dot.geometry import Block, CableSpec, DipoleDesign, Layer, TurnPolygon
 from dot.geometry.constraints import (
     check_aperture_clearance,
     check_feasibility,
+    check_inter_block_gap,
     check_inter_layer_spacing,
     check_midplane_clearance,
     check_pole_angle_limit,
@@ -172,6 +173,65 @@ def test_feasibility_applies_pole_clearance_when_configured() -> None:
     )
 
     assert any(v.constraint_name == "pole_clearance" for v in result.violations)
+
+
+def test_inter_block_gap_accepts_hand_computed_gap() -> None:
+    design = _two_block_reference_design()
+
+    assert check_inter_block_gap(design, min_gap_mm=0.8) == []
+
+
+def test_inter_block_gap_rejects_hand_computed_gap() -> None:
+    design = _two_block_reference_design()
+
+    violations = check_inter_block_gap(design, min_gap_mm=1.0)
+
+    assert [violation.constraint_name for violation in violations] == ["inter_block_gap"]
+    assert violations[0].layer_index == 0
+    assert violations[0].block_index == 0
+    assert violations[0].other_block_index == 1
+    assert violations[0].severity == pytest.approx(0.144247806, rel=0.0, abs=1.0e-6)
+
+
+def test_inter_block_gap_ignores_turns_from_same_block() -> None:
+    cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=2, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    design = DipoleDesign(aperture_radius_mm=6.0, layers=(Layer(inner_radius_mm=20.0, blocks=(block,)),))
+
+    assert check_inter_block_gap(design, min_gap_mm=1000.0) == []
+
+
+def test_inter_block_gap_ignores_overlapping_turns() -> None:
+    # Overlap is check_turn_non_intersection's job; check_inter_block_gap
+    # must not double-report it as an insufficient-gap violation.
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    b1 = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    b2 = Block(phi_deg=30.5, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    design = DipoleDesign(aperture_radius_mm=6.0, layers=(Layer(inner_radius_mm=20.0, blocks=(b1, b2)),))
+
+    assert check_inter_block_gap(design, min_gap_mm=1.0) == []
+
+
+def test_feasibility_skips_inter_block_gap_when_not_configured() -> None:
+    design = _two_block_reference_design()
+
+    result = check_feasibility(design, aperture_radius_mm=1.0, min_gap_mm=0.0, max_angle_deg=90.0)
+
+    assert not any(v.constraint_name == "inter_block_gap" for v in result.violations)
+
+
+def test_feasibility_applies_inter_block_gap_when_configured() -> None:
+    design = _two_block_reference_design()
+
+    result = check_feasibility(
+        design,
+        aperture_radius_mm=1.0,
+        min_gap_mm=0.0,
+        max_angle_deg=90.0,
+        min_inter_block_gap_mm=1.0,
+    )
+
+    assert any(v.constraint_name == "inter_block_gap" for v in result.violations)
 
 
 def test_turn_non_intersection_accepts_edge_contact_between_stacked_turns() -> None:
@@ -347,6 +407,16 @@ def _pole_reference_design() -> DipoleDesign:
     return DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(_layer(inner_radius_mm=10.0, phi_deg=30.0, cable=cable),),
+    )
+
+
+def _two_block_reference_design() -> DipoleDesign:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    first = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    second = Block(phi_deg=40.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    return DipoleDesign(
+        aperture_radius_mm=6.0,
+        layers=(Layer(inner_radius_mm=20.0, blocks=(first, second)),),
     )
 
 
