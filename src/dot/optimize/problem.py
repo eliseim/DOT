@@ -56,6 +56,12 @@ class FeasibilitySettings:
     min_pole_gap_mm: float | None = None
     min_inter_block_gap_mm: float | None = None
     enforce_layer_nesting: bool = False
+    # Cap, in degrees, on how far LayerNestingRepair (task 0043) may shift an
+    # outer layer's blocks toward the midplane to restore C10 nesting. None
+    # or <=0 disables the repair (a violation is left for the existing
+    # penalty/graded-constraint handling). 15deg mirrors dipole_designer's
+    # own max_decode_angle_repair_deg order of magnitude.
+    max_nesting_repair_deg: float | None = None
 
 
 class DipoleOptimizationProblem(Problem):

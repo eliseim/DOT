@@ -8,7 +8,7 @@ from pymoo.core.population import Population
 
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
 from dot.geometry import CableSpec
-from dot.geometry.constraints import check_feasibility
+from dot.geometry.constraints import check_feasibility, check_layer_nesting
 from dot.optimize import (
     LayerConductorData,
     LayerTopology,
@@ -18,10 +18,12 @@ from dot.optimize import (
     genome_bounds,
     load_line_margin_objective,
 )
+from dot.optimize.genome import flatten_mixed_genome
 from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.optimize.runner import (
     ConstructiveMixedVariableSampling,
     GroundTruthRepair,
+    LayerNestingRepair,
     PhiOrderingRepair,
     TurnBudgetRepair,
     _mixed_variable_nsga2,
@@ -99,6 +101,120 @@ def test_refresh_population_admission_rescoring_reflects_current_threshold() -> 
     refresh_population_admission(problem, pop)
 
     assert np.any(pop.get("G") > 0.0)
+
+
+def test_layer_nesting_repair_shifts_outer_layer_until_nesting_clears() -> None:
+    # A near-pole outer-layer block violates C10 against the inner layer's
+    # pole-most conductor -- confirmed empirically (task 0043) at these
+    # exact values. A uniform phi shift toward the midplane, capped by
+    # max_nesting_repair_deg, must clear it when the cap allows enough
+    # room, and must leave the sample untouched when it doesn't.
+    topology = _nesting_topology()
+
+    without_cap = _nesting_violation_sample()
+    feasibility_no_cap = _feasibility_with_nesting_cap(None)
+    LayerNestingRepair(topology, feasibility_no_cap)._repair_sample(without_cap)
+    assert without_cap["layer_1_block_0_phi_deg"] == pytest.approx(10.0)
+    assert _design_violates_nesting(topology, without_cap)
+
+    repaired = _nesting_violation_sample()
+    feasibility_generous_cap = _feasibility_with_nesting_cap(60.0)
+    LayerNestingRepair(topology, feasibility_generous_cap)._repair_sample(repaired)
+    assert repaired["layer_1_block_0_phi_deg"] > 10.0
+    assert repaired["layer_1_block_0_phi_deg"] <= 10.0 + 60.0
+    assert not _design_violates_nesting(topology, repaired)
+
+    capped_short = _nesting_violation_sample()
+    feasibility_tiny_cap = _feasibility_with_nesting_cap(2.0)
+    LayerNestingRepair(topology, feasibility_tiny_cap)._repair_sample(capped_short)
+    assert capped_short["layer_1_block_0_phi_deg"] == pytest.approx(10.0)
+    assert _design_violates_nesting(topology, capped_short)
+
+
+def test_layer_nesting_enforced_end_to_end_does_not_collapse_the_population() -> None:
+    # Enabling enforce_layer_nesting used to collapse the whole population
+    # (task #37) because nothing repaired a violation. With
+    # LayerNestingRepair wired into CampaignRepair, a short campaign over a
+    # topology prone to nesting violations must still produce at least one
+    # candidate that satisfies check_feasibility(enforce_layer_nesting=True).
+    topology = _nesting_topology()
+    targets = OptimizationTargets(
+        target_bore_field_t=0.01,
+        r_ref_mm=5.0,
+        max_order=4,
+        cadata_by_layer=(conductor_data(), conductor_data()),
+        temperature_k=0.0,
+    )
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.1,
+        max_angle_deg=90.0,
+        enforce_layer_nesting=True,
+        max_nesting_repair_deg=60.0,
+    )
+
+    result = run_campaign(topology, targets, feasibility, pop_size=12, n_gen=4, seed=3)
+
+    assert result.candidates
+    for candidate in result.candidates:
+        check = check_feasibility(
+            candidate.design,
+            aperture_radius_mm=topology.aperture_radius_mm,
+            min_gap_mm=feasibility.min_gap_mm,
+            max_angle_deg=feasibility.max_angle_deg,
+            enforce_layer_nesting=True,
+        )
+        assert check.is_feasible, "\n".join(v.message for v in check.violations)
+
+
+def _nesting_topology() -> Topology:
+    cable = CableSpec(width_mm=3.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    return Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=1,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(10.0, 80.0),
+                n_turns_bounds=(3, 3),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+            LayerTopology(
+                cable_id="outer",
+                n_blocks=1,
+                inner_radius_bounds_mm=(24.0, 24.0),
+                phi_bounds_deg=(5.0, 80.0),
+                n_turns_bounds=(2, 2),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable, "outer": cable},
+    )
+
+
+def _nesting_violation_sample() -> dict[str, float | int]:
+    return {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 15.0,
+        "layer_0_block_0_n_turns": 3,
+        "layer_1_inner_radius_mm": 24.0,
+        "layer_1_block_0_phi_deg": 10.0,
+        "layer_1_block_0_n_turns": 2,
+    }
+
+
+def _feasibility_with_nesting_cap(max_nesting_repair_deg: float | None) -> FeasibilitySettings:
+    return FeasibilitySettings(
+        min_gap_mm=0.1,
+        max_angle_deg=90.0,
+        max_nesting_repair_deg=max_nesting_repair_deg,
+    )
+
+
+def _design_violates_nesting(topology: Topology, sample: dict[str, float | int]) -> bool:
+    genome = flatten_mixed_genome(sample, topology)
+    design = decode(genome, topology, topology.cables)
+    return any(v.layer_index == 1 for v in check_layer_nesting(design))
 
 
 def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
