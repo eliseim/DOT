@@ -14,9 +14,9 @@ from pymoo.core.sampling import Sampling
 from pymoo.optimize import minimize
 
 from dot.geometry import DipoleDesign
-from dot.geometry.constraints import check_feasibility
+from dot.geometry.constraints import check_feasibility, check_layer_nesting
 
-from .genome import Topology, decode, flatten_mixed_genome, genome_variables
+from .genome import GenomeVariable, Topology, decode, flatten_mixed_genome, genome_variables
 from .operating_point import operating_point
 from .problem import (
     DipoleOptimizationProblem,
@@ -158,6 +158,123 @@ class PhiOrderingRepair(Repair):
                 repaired = min(max_phi, repaired)
                 sample[variable.name] = float(min(max(repaired, lower), upper))
                 previous = float(sample[variable.name])
+
+
+class LayerNestingRepair(Repair):
+    """Shift an outer layer's blocks toward the midplane to restore nesting.
+
+    Task 0037/0043: :func:`check_layer_nesting` (C10) was implemented but
+    left gated off (``enforce_layer_nesting=False``) because nothing
+    repaired a violation -- enabling it collapsed the whole population.
+    Mirrors dipole_designer's own C10 repair: bisection-search a single
+    scalar phi shift, applied to every active block in the violating outer
+    layer, that eliminates the violation. A uniform shift is a pure
+    translation, so it cannot disturb the ordering/gaps
+    ``PhiOrderingRepair`` already established -- this is why it must run
+    strictly after that repair. Applying the shift moves blocks toward the
+    midplane (increasing phi, away from the pole) because that is the
+    direction that pulls conductor vertices back onto the accepted side of
+    the inner layer's pole-side nesting edge (see
+    :func:`check_layer_nesting`'s docstring). The shift is capped by
+    ``FeasibilitySettings.max_nesting_repair_deg`` and by each block's own
+    genome-space upper phi bound; if the cap is reached before the
+    violation clears, the sample is left untouched -- like
+    ``GroundTruthRepair``, this repair never raises, it just leaves
+    residual infeasibility for the existing penalty/graded-constraint
+    handling in ``DipoleOptimizationProblem`` to deal with.
+    """
+
+    _MAX_BISECTION_ITERATIONS = 40
+
+    def __init__(self, topology: Topology, feasibility: FeasibilitySettings) -> None:
+        super().__init__()
+        self.topology = topology
+        self.feasibility = feasibility
+        self._variables = genome_variables(topology)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        for sample in x:
+            if not isinstance(sample, dict):
+                continue
+            self._repair_sample(sample)
+        return x
+
+    def _repair_sample(self, sample: dict[str, float | int]) -> None:
+        cap = self.feasibility.max_nesting_repair_deg
+        if cap is None or cap <= 0.0:
+            return
+        for layer_index in range(1, len(self.topology.layers)):
+            self._repair_layer(sample, layer_index, cap)
+
+    def _repair_layer(self, sample: dict[str, float | int], layer_index: int, cap: float) -> None:
+        phi_variables = [
+            variable
+            for variable in self._variables
+            if variable.layer_index == layer_index
+            and variable.block_index is not None
+            and variable.name.endswith("_phi_deg")
+            and _block_is_active(sample, layer_index, variable.block_index)
+        ]
+        if not phi_variables:
+            return
+        if not self._layer_has_nesting_violation(sample, layer_index):
+            return
+
+        max_shift = min(
+            cap,
+            *(variable.bounds[1] - float(sample[variable.name]) for variable in phi_variables),
+        )
+        if max_shift <= 0.0:
+            return
+        if not self._layer_has_nesting_violation(sample, layer_index, shift=max_shift):
+            self._apply_shift(sample, phi_variables, self._bisect_minimum_shift(sample, layer_index, phi_variables, max_shift))
+        # else: even the maximum permitted shift cannot clear the
+        # violation -- leave the sample untouched, per this class's
+        # docstring.
+
+    def _bisect_minimum_shift(
+        self,
+        sample: dict[str, float | int],
+        layer_index: int,
+        phi_variables: list[GenomeVariable],
+        max_shift: float,
+    ) -> float:
+        lower, upper = 0.0, max_shift
+        for _ in range(self._MAX_BISECTION_ITERATIONS):
+            midpoint = (lower + upper) / 2.0
+            if self._layer_has_nesting_violation(sample, layer_index, shift=midpoint):
+                lower = midpoint
+            else:
+                upper = midpoint
+        return upper
+
+    def _layer_has_nesting_violation(
+        self,
+        sample: dict[str, float | int],
+        layer_index: int,
+        *,
+        shift: float = 0.0,
+    ) -> bool:
+        probe = dict(sample) if shift else sample
+        if shift:
+            for variable in self._variables:
+                if (
+                    variable.layer_index == layer_index
+                    and variable.block_index is not None
+                    and variable.name.endswith("_phi_deg")
+                    and _block_is_active(sample, layer_index, variable.block_index)
+                ):
+                    probe[variable.name] = float(sample[variable.name]) + shift
+        genome = flatten_mixed_genome(probe, self.topology)
+        design = decode(genome, self.topology, self.topology.cables)
+        return any(violation.layer_index == layer_index for violation in check_layer_nesting(design))
+
+    @staticmethod
+    def _apply_shift(sample: dict[str, float | int], phi_variables: list[GenomeVariable], shift: float) -> None:
+        if shift <= 0.0:
+            return
+        for variable in phi_variables:
+            sample[variable.name] = float(sample[variable.name]) + shift
 
 
 class TurnBudgetRepair(Repair):
@@ -446,16 +563,21 @@ class CampaignRepair(Repair):
     still geometrically safe (phi gaps computed from an inflated n_turns
     are only overly conservative, never insufficient, since
     TurnBudgetRepair only ever reduces n_turns), but running turn-budget
-    repair first avoids that unnecessary conservatism. Alpha-alignment
-    repair runs next since it depends on each block's final phi.
-    GroundTruthRepair runs last: it verifies against real
-    check_feasibility and greedily shrinks anything the formula-based
+    repair first avoids that unnecessary conservatism. Layer-nesting
+    repair runs next: it applies a pure scalar-shift translation to an
+    outer layer's blocks, which preserves the ordering/gaps phi-ordering
+    repair just established, so it must run after that repair, not before
+    it (translating unordered blocks could still leave them unordered).
+    Alpha-alignment repair runs after both, since it depends on each
+    block's final phi. GroundTruthRepair runs last: it verifies against
+    real check_feasibility and greedily shrinks anything the formula-based
     repairs above still leave infeasible.
     """
 
     def __init__(self, topology: Topology, feasibility: FeasibilitySettings, targets: OptimizationTargets) -> None:
         super().__init__()
         self._phi_ordering = PhiOrderingRepair(topology, feasibility)
+        self._layer_nesting = LayerNestingRepair(topology, feasibility)
         self._turn_budget = TurnBudgetRepair(topology, targets)
         self._alpha_alignment = AlphaAlignmentRepair(topology)
         self._ground_truth = GroundTruthRepair(topology, feasibility)
@@ -463,6 +585,7 @@ class CampaignRepair(Repair):
     def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
         x = self._turn_budget._do(problem, x, **kwargs)
         x = self._phi_ordering._do(problem, x, **kwargs)
+        x = self._layer_nesting._do(problem, x, **kwargs)
         x = self._alpha_alignment._do(problem, x, **kwargs)
         return self._ground_truth._do(problem, x, **kwargs)
 
