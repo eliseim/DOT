@@ -5,7 +5,13 @@ import numpy as np
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
 from dot.geometry import CableSpec
 from dot.optimize import LayerConductorData, LayerTopology, Topology
-from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, OptimizationTargets
+from dot.optimize.problem import (
+    AdmissionSchedule,
+    AdmissionStage,
+    DipoleOptimizationProblem,
+    FeasibilitySettings,
+    OptimizationTargets,
+)
 
 
 def test_problem_marks_overlapping_turns_as_constraint_violation() -> None:
@@ -111,6 +117,101 @@ def test_problem_anneals_target_admission_thresholds_to_final_targets() -> None:
     assert late_harmonic == targets.max_harmonic_units
     assert late_margin == targets.min_margin_percent
     assert late_current == targets.max_current_a
+
+
+def test_problem_admission_schedule_none_preserves_linear_anneal_exactly() -> None:
+    # Locks the default (admission_schedule=None) fallback's exact values --
+    # protects against a staged-schedule port accidentally changing the
+    # default behavior every existing campaign/test relies on.
+    targets = _targets(max_harmonic_units=10.0, min_margin_percent=15.0, max_current_a=13000.0)
+    problem = DipoleOptimizationProblem(_topology(), targets, _feasibility(), total_generations=10)
+
+    harmonic, margin, current = problem.admission_thresholds(generation=5)
+
+    progress = 5 / 10
+    expected_harmonic = 100.0 + progress * (10.0 - 100.0)
+    expected_margin = -5.0 + progress * (15.0 - -5.0)
+    expected_current = 26000.0 + progress * (13000.0 - 26000.0)
+    assert harmonic == expected_harmonic
+    assert margin == expected_margin
+    assert current == expected_current
+
+
+def test_problem_staged_schedule_holds_constant_within_a_stage_then_steps() -> None:
+    # The actual behavioral difference from the linear anneal: within a
+    # stage's fraction range the threshold must not move at all, and must
+    # jump discontinuously the generation progress crosses a boundary -- a
+    # naive port could wrongly interpolate instead of stepping.
+    schedule = AdmissionSchedule(
+        stages=(
+            AdmissionStage(end_fraction=0.5, harmonic_multiplier=4.0, margin_relaxation_percent=10.0, current_multiplier=2.0),
+            AdmissionStage(end_fraction=1.0, harmonic_multiplier=1.0, margin_relaxation_percent=0.0, current_multiplier=1.0),
+        )
+    )
+    targets = _targets(
+        max_harmonic_units=5.0,
+        min_margin_percent=25.0,
+        max_current_a=10000.0,
+        admission_schedule=schedule,
+    )
+    problem = DipoleOptimizationProblem(_topology(), targets, _feasibility(), total_generations=10)
+
+    # generations 1..5 all fall within the first stage (progress <= 0.5).
+    thresholds_by_generation = [problem.admission_thresholds(generation=g) for g in (1, 3, 5)]
+    assert len(set(thresholds_by_generation)) == 1, "threshold must be constant within a stage"
+    first_stage_harmonic, first_stage_margin, first_stage_current = thresholds_by_generation[0]
+    assert first_stage_harmonic == 20.0
+    assert first_stage_margin == 15.0
+    assert first_stage_current == 20000.0
+
+    # generation 6 (progress=0.6) crosses into the second stage.
+    second_stage_harmonic, second_stage_margin, second_stage_current = problem.admission_thresholds(generation=6)
+    assert second_stage_harmonic == 5.0
+    assert second_stage_margin == 25.0
+    assert second_stage_current == 10000.0
+    assert second_stage_harmonic != first_stage_harmonic
+    assert second_stage_margin != first_stage_margin
+    assert second_stage_current != first_stage_current
+
+
+def test_refresh_population_admission_reflects_staged_threshold_step() -> None:
+    # Mirrors test_runner.py's task-0042 stale-G regression test, but with a
+    # staged schedule: a candidate admitted as feasible during an early
+    # plateau must be correctly re-flagged infeasible the generation a
+    # later stage steps the threshold down -- proving staged thresholds
+    # compose correctly with refresh_population_admission.
+    from pymoo.core.population import Population
+
+    from dot.optimize.runner import refresh_population_admission
+
+    topology = _topology()
+    schedule = AdmissionSchedule(
+        stages=(
+            AdmissionStage(end_fraction=0.5, harmonic_multiplier=100.0, margin_relaxation_percent=0.0, current_multiplier=1.0),
+            AdmissionStage(end_fraction=1.0, harmonic_multiplier=1.0, margin_relaxation_percent=0.0, current_multiplier=1.0),
+        )
+    )
+    baseline_problem = DipoleOptimizationProblem(topology, _targets(), _feasibility())
+    feasible_genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0])
+    raw_field_quality = float(baseline_problem.evaluate(feasible_genome, return_values_of=["F"])[0])
+    assert raw_field_quality > 0.0
+
+    total_generations = 10
+    targets_with_harmonic = _targets(max_harmonic_units=raw_field_quality / 2.0, admission_schedule=schedule)
+    problem = DipoleOptimizationProblem(topology, targets_with_harmonic, _feasibility(), total_generations=total_generations)
+
+    problem.set_generation(1)
+    f1, g1 = problem.evaluate(feasible_genome, return_values_of=["F", "G"])
+    assert np.all(np.atleast_1d(g1) <= 0.0)
+
+    pop = Population.new(X=np.atleast_2d(feasible_genome))
+    pop.set("F", np.atleast_2d(f1))
+    pop.set("G", np.atleast_2d(g1))
+
+    problem.set_generation(total_generations)
+    refresh_population_admission(problem, pop)
+
+    assert np.any(pop.get("G") > 0.0)
 
 
 def test_problem_marks_operating_current_above_cap_as_graded_constraint_violation() -> None:
@@ -265,6 +366,7 @@ def _targets(
     min_margin_percent: float | None = None,
     max_total_turns: int | None = None,
     max_turns_per_layer: int | None = None,
+    admission_schedule: AdmissionSchedule | None = None,
 ) -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.02,
@@ -277,6 +379,7 @@ def _targets(
         max_current_a=max_current_a,
         max_total_turns=max_total_turns,
         max_turns_per_layer=max_turns_per_layer,
+        admission_schedule=admission_schedule,
     )
 
 

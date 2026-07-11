@@ -30,6 +30,72 @@ class MarginEvaluationExclusion:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmissionStage:
+    """One plateau in a staged admission schedule.
+
+    ``end_fraction`` is the generation-progress fraction (0-1) through
+    which this stage's thresholds stay in effect. Thresholds are resolved
+    as multipliers/relaxations against the campaign's final targets:
+    ``harmonic_threshold = harmonic_multiplier * max_harmonic_units``,
+    ``margin_threshold = min_margin_percent - margin_relaxation_percent``,
+    ``current_threshold = current_multiplier * max_current_a``.
+    """
+
+    end_fraction: float
+    harmonic_multiplier: float
+    margin_relaxation_percent: float
+    current_multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionSchedule:
+    """A sequence of :class:`AdmissionStage` plateaus, replacing the default
+    single linear anneal (task 0044/dd's multi-stage admission).
+
+    Unlike the linear anneal, thresholds hold **constant** within a stage
+    and step discontinuously at each ``end_fraction`` boundary -- this
+    gives the population time to consolidate against a given threshold
+    before it tightens again, rather than continuously chasing a moving
+    target from generation 1.
+    """
+
+    stages: tuple[AdmissionStage, ...]
+
+    def __post_init__(self) -> None:
+        if not self.stages:
+            raise ValueError("AdmissionSchedule requires at least one stage")
+        previous_end = 0.0
+        for stage in self.stages:
+            if stage.end_fraction <= previous_end:
+                raise ValueError(
+                    "AdmissionSchedule stage end_fraction values must be strictly increasing "
+                    f"(got {stage.end_fraction} after {previous_end})"
+                )
+            previous_end = stage.end_fraction
+        if self.stages[-1].end_fraction != 1.0:
+            raise ValueError("AdmissionSchedule's last stage must end at end_fraction=1.0")
+
+    def stage_for_progress(self, progress: float) -> AdmissionStage:
+        for stage in self.stages:
+            if progress <= stage.end_fraction:
+                return stage
+        return self.stages[-1]
+
+
+# dd's own suggested defaults (end_fractions/harmonic_multipliers/
+# margin_relaxations_pp), extended with a current_multiplier axis DOT
+# already anneals but dd doesn't stage the same way.
+DEFAULT_ADMISSION_SCHEDULE = AdmissionSchedule(
+    stages=(
+        AdmissionStage(end_fraction=0.4, harmonic_multiplier=4.0, margin_relaxation_percent=10.0, current_multiplier=1.5),
+        AdmissionStage(end_fraction=0.7, harmonic_multiplier=2.0, margin_relaxation_percent=5.0, current_multiplier=1.2),
+        AdmissionStage(end_fraction=0.9, harmonic_multiplier=1.0, margin_relaxation_percent=2.0, current_multiplier=1.0),
+        AdmissionStage(end_fraction=1.0, harmonic_multiplier=1.0, margin_relaxation_percent=0.0, current_multiplier=1.0),
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
 class OptimizationTargets:
     """Physics targets and conductor inputs for one campaign."""
 
@@ -44,6 +110,10 @@ class OptimizationTargets:
     max_total_turns: int | None = None
     max_turns_per_layer: int | None = None
     excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
+    # None (default) preserves the original single linear anneal exactly.
+    # When set, admission_thresholds() uses this staged schedule instead
+    # (task 0044).
+    admission_schedule: AdmissionSchedule | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +177,10 @@ class DipoleOptimizationProblem(Problem):
         if generation is None:
             generation = self.current_generation
         progress = min(1.0, max(1, int(generation)) / self.total_generations)
+
+        if self.targets.admission_schedule is not None:
+            return self._staged_admission_thresholds(progress)
+
         harmonic_threshold = None
         if self.targets.max_harmonic_units is not None:
             start = self.targets.max_harmonic_units * _START_HARMONIC_RELAXATION_MULTIPLIER
@@ -119,6 +193,20 @@ class DipoleOptimizationProblem(Problem):
         if self.targets.max_current_a is not None:
             start = self.targets.max_current_a * _START_CURRENT_RELAXATION_MULTIPLIER
             current_threshold = start + progress * (self.targets.max_current_a - start)
+        return harmonic_threshold, margin_threshold, current_threshold
+
+    def _staged_admission_thresholds(self, progress: float) -> tuple[float | None, float | None, float | None]:
+        assert self.targets.admission_schedule is not None
+        stage = self.targets.admission_schedule.stage_for_progress(progress)
+        harmonic_threshold = None
+        if self.targets.max_harmonic_units is not None:
+            harmonic_threshold = stage.harmonic_multiplier * self.targets.max_harmonic_units
+        margin_threshold = None
+        if self.targets.min_margin_percent is not None:
+            margin_threshold = self.targets.min_margin_percent - stage.margin_relaxation_percent
+        current_threshold = None
+        if self.targets.max_current_a is not None:
+            current_threshold = stage.current_multiplier * self.targets.max_current_a
         return harmonic_threshold, margin_threshold, current_threshold
 
     def _evaluate(self, x, out, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
