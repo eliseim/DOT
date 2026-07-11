@@ -233,6 +233,23 @@ def test_run_campaign_with_adaptive_offspring_still_produces_candidates() -> Non
     assert result.candidates
 
 
+def test_run_campaign_with_refinement_still_produces_candidates() -> None:
+    from dot.optimize.refinement import RefinementConfig
+
+    topology = _topology()
+    result = run_campaign(
+        topology,
+        _targets(),
+        _feasibility(),
+        pop_size=8,
+        n_gen=3,
+        seed=7,
+        refinement=RefinementConfig(enabled=True, max_seeds=2, population=4, generations=2),
+    )
+
+    assert result.candidates
+
+
 def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
     topology = _four_layer_topology()
     targets = OptimizationTargets(
