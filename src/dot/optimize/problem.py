@@ -188,8 +188,23 @@ class DipoleOptimizationProblem(Problem):
                 )
                 objectives[row_index] = (field_quality, -margin_percent)
                 if harmonic_threshold_units is not None:
-                    harmonic_threshold = harmonic_threshold_units / 1.0e4
-                    constraints[row_index, target_constraint_index] = max(0.0, field_quality - harmonic_threshold)
+                    # field_quality_objective's raw return value is already
+                    # in CERN/European relative "units" (parts per 1e4 of
+                    # the main dipole term) -- see multipole_coefficients'
+                    # own docstring ("multiplied by 1e4... b_1 is 10000 for
+                    # a normal dipole"). Dividing harmonic_threshold_units
+                    # by 1e4 here compared an already-units-scaled target
+                    # against an already-units-scaled objective after an
+                    # extra, erroneous 1e4 shrink -- confirmed against the
+                    # real CTH-14T design (tests/physics/
+                    # test_roxie_parity_live.py's _cth14t_design()), whose
+                    # own field_quality_objective is ~2.0 (sensible against
+                    # a 5.0-unit target) but would fail the old
+                    # 0.0005-unit threshold by a factor of ~4000. No
+                    # conversion needed: compare directly.
+                    constraints[row_index, target_constraint_index] = max(
+                        0.0, field_quality - harmonic_threshold_units
+                    )
                     target_constraint_index += 1
                 if margin_threshold_percent is not None:
                     constraints[row_index, target_constraint_index] = max(
