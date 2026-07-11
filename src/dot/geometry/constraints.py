@@ -206,6 +206,53 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
     return violations
 
 
+def check_inter_block_gap(
+    design: DipoleDesign,
+    min_gap_mm: float,
+) -> list[Violation]:
+    """Check turns from different blocks in the same layer clear a minimum gap.
+
+    ``check_turn_non_intersection`` only rejects actual positive-area
+    overlap (gap < 0); it says nothing about two blocks close enough that
+    there is no physical room for the insulation/wedge between them. This
+    is the counterpart to dipole_designer's C7 (electrical/wedge
+    inter-block gap) -- a minimum *positive* clearance, checked only
+    between turns of different blocks within the same layer (turns in
+    different layers are already governed by
+    :func:`check_inter_layer_spacing`).
+    """
+
+    violations: list[Violation] = []
+    turns = tuple(_iter_indexed_turns(design))
+    for left_index, left in enumerate(turns):
+        for right in turns[left_index + 1 :]:
+            if left.layer_index != right.layer_index or left.block_index == right.block_index:
+                continue
+            if _convex_polygons_overlap(left.turn.corners, right.turn.corners):
+                continue
+            gap = _convex_polygon_distance(left.turn.corners, right.turn.corners)
+            if gap < min_gap_mm - _EPSILON:
+                violations.append(
+                    Violation(
+                        constraint_name="inter_block_gap",
+                        message=(
+                            f"Inter-block clearance {gap:.6g} mm is below required "
+                            f"{min_gap_mm:.6g} mm: "
+                            f"L{left.layer_index}/B{left.block_index}/T{left.turn_index} "
+                            f"with L{right.layer_index}/B{right.block_index}/T{right.turn_index}."
+                        ),
+                        severity=min_gap_mm - gap,
+                        layer_index=left.layer_index,
+                        block_index=left.block_index,
+                        turn_index=left.turn_index,
+                        other_layer_index=right.layer_index,
+                        other_block_index=right.block_index,
+                        other_turn_index=right.turn_index,
+                    )
+                )
+    return violations
+
+
 def check_pole_angle_limit(
     design: DipoleDesign,
     max_angle_deg: float | Sequence[float],
@@ -243,6 +290,7 @@ def check_feasibility(
     max_angle_deg: float | Sequence[float],
     min_layer_clearance_mm: float = 0.1,
     min_pole_gap_mm: float | None = None,
+    min_inter_block_gap_mm: float | None = None,
 ) -> FeasibilityResult:
     """Run all geometry feasibility constraints and aggregate violations."""
 
@@ -253,6 +301,8 @@ def check_feasibility(
     if min_pole_gap_mm is not None:
         violations.extend(check_pole_clearance(design, min_pole_gap_mm))
     violations.extend(check_turn_non_intersection(design))
+    if min_inter_block_gap_mm is not None:
+        violations.extend(check_inter_block_gap(design, min_inter_block_gap_mm))
     violations.extend(check_pole_angle_limit(design, max_angle_deg))
     return FeasibilityResult(is_feasible=not violations, violations=tuple(violations))
 
@@ -327,6 +377,22 @@ def _convex_polygon_overlap_depth(left: tuple[Point, ...], right: tuple[Point, .
         right_min, right_max = _project_onto_axis(right, axis)
         depths.append(min(left_max, right_max) - max(left_min, right_min))
     return max(0.0, min(depths)) if depths else 0.0
+
+
+def _convex_polygon_distance(left: tuple[Point, ...], right: tuple[Point, ...]) -> float:
+    """Minimum distance between two disjoint (non-overlapping) convex polygons."""
+
+    candidates = [
+        _distance_point_to_segment(vertex, start, end)
+        for vertex in left
+        for start, end in _edges(right)
+    ]
+    candidates.extend(
+        _distance_point_to_segment(vertex, start, end)
+        for vertex in right
+        for start, end in _edges(left)
+    )
+    return min(candidates)
 
 
 def _edge_normals(points: tuple[Point, ...]) -> Iterator[Point]:
