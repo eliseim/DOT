@@ -19,6 +19,7 @@ from dot.optimize import (
 from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.optimize.runner import (
     ConstructiveMixedVariableSampling,
+    GroundTruthRepair,
     PhiOrderingRepair,
     TurnBudgetRepair,
     _mixed_variable_nsga2,
@@ -209,6 +210,57 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
         topology.layers[0].phi_bounds_deg[0] <= phi <= topology.layers[0].phi_bounds_deg[1]
         for phi in phis
     )
+
+
+def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:
+    cable = CableSpec(width_inner_mm=1.53, width_outer_mm=1.658, height_mm=18.363, insulation_radial_mm=0.145, insulation_azimuthal_mm=0.145)
+    topology = Topology(
+        aperture_radius_mm=25.0,
+        layers=(
+            LayerTopology(
+                cable_id="c",
+                n_blocks=2,
+                inner_radius_bounds_mm=(30.0, 30.0),
+                phi_bounds_deg=(12.0, 78.0),
+                n_turns_bounds=(1, 15),
+                alpha_bounds_deg=(-88.0, 10.0),
+            ),
+        ),
+        cables={"c": cable},
+    )
+    feasibility = FeasibilitySettings(min_gap_mm=0.15, max_angle_deg=80.0, min_pole_gap_mm=1.5)
+    # block1 gets genome_bounds()'s pole-side window; anchored at its own
+    # lower bound (12deg) with a "correctly aligned" alpha and 8 turns --
+    # confirmed (this session's diagnosis) to violate pole_angle_limit
+    # (required minimum 90-80=10deg from the pole) despite the anchor
+    # phi itself clearing that floor.
+    sample = {
+        "layer_0_inner_radius_mm": 30.0,
+        "layer_0_block_0_phi_deg": 70.0,
+        "layer_0_block_0_n_turns": 10,
+        "layer_0_block_1_phi_deg": 12.0,
+        "layer_0_block_1_n_turns": 8,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 12.0 - 90.0,
+    }
+
+    repaired = GroundTruthRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
+
+    from dot.optimize.genome import flatten_mixed_genome
+
+    genome = flatten_mixed_genome(repaired, topology)
+    unit_design = decode(genome, topology, topology.cables)
+    result = check_feasibility(
+        unit_design,
+        aperture_radius_mm=topology.aperture_radius_mm,
+        min_gap_mm=feasibility.min_gap_mm,
+        max_angle_deg=feasibility.max_angle_deg,
+        min_pole_gap_mm=feasibility.min_pole_gap_mm,
+    )
+    assert result.is_feasible, "\n".join(v.message for v in result.violations)
+    # Repaired by shrinking the offending (pole-ward) block, not the safe one.
+    assert repaired["layer_0_block_1_n_turns"] < 8
+    assert repaired["layer_0_block_0_n_turns"] == 10
 
 
 def test_turn_budget_repair_reduces_largest_active_turn_counts_first() -> None:

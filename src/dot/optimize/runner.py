@@ -14,6 +14,7 @@ from pymoo.core.sampling import Sampling
 from pymoo.optimize import minimize
 
 from dot.geometry import DipoleDesign
+from dot.geometry.constraints import check_feasibility
 
 from .genome import Topology, decode, flatten_mixed_genome, genome_variables
 from .operating_point import operating_point
@@ -290,6 +291,152 @@ class AlphaAlignmentRepair(Repair):
                 sample[variable.name] = float(min(max(current, lower), upper))
 
 
+class GroundTruthRepair(Repair):
+    """Final safety-net repair: verify against real check_feasibility, shrink if not.
+
+    PhiOrderingRepair, TurnBudgetRepair, and AlphaAlignmentRepair are all
+    formula-based -- they restore structural invariants (ordering,
+    budgets, an approximate alpha target) without ever calling
+    :func:`check_feasibility` themselves. Confirmed empirically
+    (coordinator) that this is not sufficient: even a single turn built
+    from AlphaAlignmentRepair's "aligned" alpha target can land well
+    outside a real constraint (e.g. ``check_pole_angle_limit``'s
+    minimum-angle-from-pole requirement) for blocks positioned close to a
+    layer's pole-ward bound, because a finite cable width subtends a much
+    larger angle at small angle-from-pole than the formulas account for.
+
+    This mirrors the campaign's own initial-population sampler
+    (``ActiveAwareGrowthSampling``), which uses real ``check_feasibility``
+    as ground truth while growing turns and reliably produces a healthy
+    population -- but nothing did the equivalent after mating. This repair
+    closes that gap: verify the fully-repaired sample against real
+    feasibility, and if still infeasible, greedily shrink it (reduce the
+    most-turn-heavy active non-block-0 block by one turn, or deactivate it
+    once at its lower bound; fall back to block 0 only once no other
+    active block remains) until feasible or a bounded number of attempts
+    is exhausted. A sample that still can't be repaired within that budget
+    is left as-is -- the existing graded/``_PENALTY`` handling in
+    ``DipoleOptimizationProblem`` still applies to it.
+    """
+
+    _MAX_ATTEMPTS = 40
+
+    def __init__(
+        self,
+        topology: Topology,
+        feasibility: FeasibilitySettings,
+    ) -> None:
+        super().__init__()
+        self.topology = topology
+        self.feasibility = feasibility
+        self._variables = genome_variables(topology)
+
+    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        for sample in x:
+            if not isinstance(sample, dict):
+                continue
+            self._repair_sample(sample)
+        return x
+
+    def _repair_sample(self, sample: dict[str, float | int]) -> None:
+        for _attempt in range(self._MAX_ATTEMPTS):
+            genome = flatten_mixed_genome(sample, self.topology)
+            unit_design = decode(genome, self.topology, self.topology.cables)
+            result = check_feasibility(
+                unit_design,
+                aperture_radius_mm=self.topology.aperture_radius_mm,
+                min_gap_mm=self.feasibility.min_gap_mm,
+                max_angle_deg=self.feasibility.max_angle_deg,
+                min_layer_clearance_mm=self.feasibility.min_layer_clearance_mm,
+                min_pole_gap_mm=self.feasibility.min_pole_gap_mm,
+                min_inter_block_gap_mm=self.feasibility.min_inter_block_gap_mm,
+                enforce_layer_nesting=self.feasibility.enforce_layer_nesting,
+            )
+            if result.is_feasible:
+                return
+            if not self._shrink_worst_block(sample, result):
+                return
+
+    def _shrink_worst_block(self, sample: dict[str, float | int], result) -> bool:  # noqa: ANN001
+        violated_decode_space = {
+            (v.layer_index, v.block_index) for v in result.violations if v.block_index is not None
+        }
+        violated_decode_space |= {
+            (v.other_layer_index, v.other_block_index)
+            for v in result.violations
+            if v.other_block_index is not None
+        }
+        # Violation.block_index is the block's position in the *decoded*
+        # design (decode() skips inactive genome slots and re-indexes the
+        # survivors from 0), not its genome-space index (the one used in
+        # sample dict keys like "layer_L_block_G_n_turns"). Translate before
+        # touching the sample, or this can end up "fixing" an unrelated
+        # (possibly already-inactive) genome slot while the real offender
+        # is left untouched.
+        violated = {
+            (layer_index, self._genome_block_index(sample, layer_index, decode_block_index))
+            for layer_index, decode_block_index in violated_decode_space
+        }
+        candidates = [
+            (layer_index, block_index)
+            for layer_index, block_index in violated
+            if block_index is not None and block_index != 0
+        ]
+        if not candidates:
+            candidates = [(li, bi) for li, bi in violated if bi is not None]
+        if not candidates:
+            return False
+
+        best: tuple[int, int, str, int] | None = None
+        for layer_index, block_index in candidates:
+            turns_name = f"layer_{layer_index}_block_{block_index}_n_turns"
+            if turns_name not in sample:
+                continue
+            current = int(round(float(sample[turns_name])))
+            variable = next(v for v in self._variables if v.name == turns_name)
+            lower = int(round(variable.bounds[0]))
+            if best is None or current > best[0]:
+                best = (current, lower, turns_name, block_index)
+
+        if best is None:
+            return False
+        current, lower, turns_name, block_index = best
+        if current > lower:
+            sample[turns_name] = current - 1
+            return True
+        if block_index != 0:
+            active_name = turns_name.replace("_n_turns", "_active")
+            # A missing key means "active" (see _block_is_active's own
+            # default) -- deactivation must still be possible by *setting*
+            # the key, not skipped just because it doesn't exist yet.
+            if bool(sample.get(active_name, True)):
+                sample[active_name] = False
+                return True
+        return False
+
+    def _genome_block_index(
+        self,
+        sample: dict[str, float | int],
+        layer_index: int,
+        decode_block_index: int,
+    ) -> int:
+        """Map a decode-space block index (position among active blocks) to genome-space."""
+
+        seen = -1
+        n_blocks = self.topology.layers[layer_index].n_blocks
+        for genome_block_index in range(n_blocks):
+            if not _block_is_active(sample, layer_index, genome_block_index):
+                continue
+            seen += 1
+            if seen == decode_block_index:
+                return genome_block_index
+        # decode_block_index should always resolve given a Violation was
+        # produced from this same sample's decoded design; fall back to a
+        # value with no matching genome key rather than raise, so the
+        # caller's "turns_name not in sample" skip handles it gracefully.
+        return -1
+
+
 class CampaignRepair(Repair):
     """Apply all mixed-variable structural repairs in a fixed sequence.
 
@@ -300,7 +447,10 @@ class CampaignRepair(Repair):
     are only overly conservative, never insufficient, since
     TurnBudgetRepair only ever reduces n_turns), but running turn-budget
     repair first avoids that unnecessary conservatism. Alpha-alignment
-    repair runs last since it depends on each block's final phi.
+    repair runs next since it depends on each block's final phi.
+    GroundTruthRepair runs last: it verifies against real
+    check_feasibility and greedily shrinks anything the formula-based
+    repairs above still leave infeasible.
     """
 
     def __init__(self, topology: Topology, feasibility: FeasibilitySettings, targets: OptimizationTargets) -> None:
@@ -308,11 +458,13 @@ class CampaignRepair(Repair):
         self._phi_ordering = PhiOrderingRepair(topology, feasibility)
         self._turn_budget = TurnBudgetRepair(topology, targets)
         self._alpha_alignment = AlphaAlignmentRepair(topology)
+        self._ground_truth = GroundTruthRepair(topology, feasibility)
 
     def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
         x = self._turn_budget._do(problem, x, **kwargs)
         x = self._phi_ordering._do(problem, x, **kwargs)
-        return self._alpha_alignment._do(problem, x, **kwargs)
+        x = self._alpha_alignment._do(problem, x, **kwargs)
+        return self._ground_truth._do(problem, x, **kwargs)
 
 
 def run_campaign(
