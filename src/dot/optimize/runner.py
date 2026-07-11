@@ -86,7 +86,7 @@ class ConstructiveMixedVariableSampling(Sampling):
                     turn_counts,
                     radius,
                     cable_width,
-                    self.feasibility.min_gap_mm,
+                    _repair_target_gap_mm(self.feasibility),
                     rng,
                 )
                 for name, phi in phis.items():
@@ -141,7 +141,7 @@ class PhiOrderingRepair(Repair):
                 _minimum_phi_gap_deg(
                     radius,
                     cable_width,
-                    self.feasibility.min_gap_mm,
+                    _repair_target_gap_mm(self.feasibility),
                     n_turns=_sample_n_turns(sample, layer_index, variable.block_index),
                 )
                 for variable in ordered
@@ -468,6 +468,20 @@ def _sample_turn_counts(
         block_index: _sample_n_turns(sample, layer_index, block_index)
         for _name, block_index, _bounds in phi_variables
     }
+
+
+def _repair_target_gap_mm(feasibility: FeasibilitySettings) -> float:
+    """Minimum inter-block gap the phi repair/sampler should target.
+
+    ``feasibility.min_gap_mm`` is the midplane-clearance value (dd's C4),
+    which is unrelated to and typically much smaller than the inter-block
+    gap requirement (dd's C7a/C7b, ``min_inter_block_gap_mm``). Repairing
+    only to ``min_gap_mm`` left offspring with real (but unrepaired)
+    ``inter_block_gap`` violations whenever a campaign configured a
+    stricter wedge-gap minimum -- use whichever is larger.
+    """
+
+    return max(feasibility.min_gap_mm, feasibility.min_inter_block_gap_mm or 0.0)
 
 
 def _block_is_active(sample: dict[str, float | int], layer_index: int, block_index: int) -> bool:
