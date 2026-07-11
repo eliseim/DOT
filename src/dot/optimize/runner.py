@@ -647,6 +647,7 @@ def run_campaign(
     seed: int | None = None,
     topology_survival: TopologySurvivalConfig | None = None,
     adaptive_offspring: bool = False,
+    refinement: "RefinementConfig | None" = None,
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
@@ -681,6 +682,16 @@ def run_campaign(
                     objectives=(float(objective[0]), float(objective[1])),
                 )
             )
+    if refinement is not None and refinement.enabled and candidates:
+        # Local import: refinement.py imports ParetoCandidate/ParetoResult/
+        # _margin_exclusions from this module, so importing it back at
+        # module level here would create a circular import.
+        from .refinement import run_refinement, select_refinement_seeds
+
+        seeds = select_refinement_seeds(tuple(candidates), refinement)
+        refined = run_refinement(targets, feasibility, seeds, refinement)
+        candidates = list(candidates) + list(refined.candidates)
+
     return ParetoResult(
         candidates=tuple(candidates),
         excluded_margin_layers=_margin_exclusions(targets),
