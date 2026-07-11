@@ -102,6 +102,29 @@ def test_live_roxie_field_parity_alpha_zero_single_block(tmp_path: Path) -> None
     assert alpha_zero_comparison.relative_error < FIELD_TOLERANCE_REL
 
 
+def test_live_roxie_field_parity_large_negative_alpha_multiturn_near_pole(tmp_path: Path) -> None:
+    """Regression guard for the task 0029/0030 CTH campaign investigation.
+
+    A near-pole block (large negative alpha, matching the
+    AlphaAlignmentRepair target of roughly phi-90) with multiple turns was
+    suspected of using an incorrect turn-stacking geometry (comparing
+    against dipole_designer's simpler linear-step model, which turned out
+    to NOT match ROXIE here). Directly validated against live ROXIE
+    instead: DOT's existing Block.turns() stacking (_arc_stacked_anchor)
+    matches real ROXIE conductor corners to ~0.2mm and bore field to
+    <0.2% relative error even at alpha=-75deg, confirming the geometry is
+    correct and the near-pole self-overlap/pole-clearance failures seen at
+    high turn counts are a genuine physical packing constraint, not a
+    coordinate bug.
+    """
+
+    _require_live_roxie()
+
+    pole_comparison = _large_negative_alpha_multiturn_comparison(tmp_path)
+
+    assert pole_comparison.relative_error < FIELD_TOLERANCE_REL
+
+
 @pytest.mark.parametrize(
     ("inner_radius_mm", "phi_deg"),
     (
@@ -208,6 +231,46 @@ def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
     return _compare_with_roxie(
         tmp_path,
         case_name="alpha0_single_block_no_iron",
+        design=design,
+        block_records=(record,),
+        r_ref_mm=25.0,
+    )
+
+
+def _large_negative_alpha_multiturn_comparison(tmp_path: Path) -> LiveComparison:
+    phi_deg = 15.0
+    alpha_deg = -75.0
+    n_turns = 3
+    radius_mm = 30.0
+
+    def build(current_a: float) -> DipoleDesign:
+        block = Block(
+            phi_deg=phi_deg,
+            alpha_deg=alpha_deg,
+            n_turns=n_turns,
+            cable=CTH_HF,
+            inner_radius_mm=radius_mm,
+            current_a=current_a,
+        )
+        return DipoleDesign(aperture_radius_mm=25.0, layers=(Layer(inner_radius_mm=radius_mm, blocks=(block,)),))
+
+    unit_current_design = build(current_a=1.0)
+    unit_field_t = _dot_field(unit_current_design)
+    current_a = 5.0 / unit_field_t
+    design = build(current_a=current_a)
+    record = RoxieBlockRecord(
+        number=1,
+        n_turns=n_turns,
+        radius_mm=radius_mm,
+        phi_roxie_deg=90.0 - phi_deg,
+        alpha_roxie_deg=-alpha_deg,
+        current_a=current_a,
+        conductor_name="CTH_HF",
+        n2=20,
+    )
+    return _compare_with_roxie(
+        tmp_path,
+        case_name="pole_alpha75_3turns_no_iron",
         design=design,
         block_records=(record,),
         r_ref_mm=25.0,
