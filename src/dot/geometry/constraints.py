@@ -119,6 +119,84 @@ def check_inter_layer_spacing(
     return violations
 
 
+def check_layer_nesting(design: DipoleDesign) -> list[Violation]:
+    """Check each layer nests below the previous layer's pole-most conductor.
+
+    DOT's counterpart to dipole_designer's C10: a physical windability
+    check independent of radial spacing (:func:`check_inter_layer_spacing`).
+    Take the inner layer's pole-most block's pole-side turn edge (the
+    stacking direction confirmed, via live ROXIE, to point toward the pole
+    as turn index increases -- see task 0031), prolong it into an infinite
+    line, and require every vertex of the outer layer's turns to stay on
+    the same side as the origin. A vertex crossing to the far side means
+    the outer layer cannot physically nest over the inner layer's winding.
+    """
+
+    violations: list[Violation] = []
+    non_empty_layers = [
+        (layer_index, turns)
+        for layer_index in range(len(design.layers))
+        if (turns := tuple(_iter_layer_turns(design, layer_index)))
+    ]
+    for (inner_layer_index, inner_turns), (outer_layer_index, outer_turns) in zip(
+        non_empty_layers,
+        non_empty_layers[1:],
+        strict=False,
+    ):
+        edge = _layer_pole_side_nesting_edge(inner_turns)
+        if edge is None:
+            continue
+        p1, p2 = edge
+        edge_length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if edge_length <= _EPSILON:
+            continue
+        origin_side = _signed_half_plane_value(p1, p2, (0.0, 0.0))
+        if abs(origin_side) <= _EPSILON:
+            continue
+        accepted_sign = 1.0 if origin_side >= 0.0 else -1.0
+        for indexed in outer_turns:
+            for vertex in indexed.turn.corners:
+                distance = accepted_sign * _signed_half_plane_value(p1, p2, vertex) / edge_length
+                if distance < -_EPSILON:
+                    violations.append(
+                        Violation(
+                            constraint_name="layer_nesting",
+                            message=(
+                                f"Layer {outer_layer_index} conductor extends "
+                                f"{-distance:.6g} mm past the prolonged pole-side "
+                                f"edge of layer {inner_layer_index}'s pole-most "
+                                "conductor -- it cannot physically nest over it."
+                            ),
+                            severity=-distance,
+                            layer_index=outer_layer_index,
+                            block_index=indexed.block_index,
+                            turn_index=indexed.turn_index,
+                            other_layer_index=inner_layer_index,
+                        )
+                    )
+    return violations
+
+
+def _layer_pole_side_nesting_edge(
+    layer_turns: tuple[_IndexedTurn, ...],
+) -> tuple[Point, Point] | None:
+    if not layer_turns:
+        return None
+    pole_most_block_index = min(
+        {indexed.block_index for indexed in layer_turns},
+        key=lambda block_index: min(
+            _angle_from_y_axis_deg(vertex)
+            for indexed in layer_turns
+            if indexed.block_index == block_index
+            for vertex in indexed.turn.corners
+        ),
+    )
+    block_turns = [indexed for indexed in layer_turns if indexed.block_index == pole_most_block_index]
+    pole_most_turn = max(indexed.turn_index for indexed in block_turns)
+    last_turn = next(indexed.turn for indexed in block_turns if indexed.turn_index == pole_most_turn)
+    return last_turn.corners[1], last_turn.corners[2]
+
+
 def check_midplane_clearance(
     design: DipoleDesign,
     min_gap_mm: float,
@@ -291,6 +369,7 @@ def check_feasibility(
     min_layer_clearance_mm: float = 0.1,
     min_pole_gap_mm: float | None = None,
     min_inter_block_gap_mm: float | None = None,
+    enforce_layer_nesting: bool = False,
 ) -> FeasibilityResult:
     """Run all geometry feasibility constraints and aggregate violations."""
 
@@ -303,6 +382,8 @@ def check_feasibility(
     violations.extend(check_turn_non_intersection(design))
     if min_inter_block_gap_mm is not None:
         violations.extend(check_inter_block_gap(design, min_inter_block_gap_mm))
+    if enforce_layer_nesting:
+        violations.extend(check_layer_nesting(design))
     violations.extend(check_pole_angle_limit(design, max_angle_deg))
     return FeasibilityResult(is_feasible=not violations, violations=tuple(violations))
 
@@ -407,6 +488,10 @@ def _edge_normals(points: tuple[Point, ...]) -> Iterator[Point]:
 def _project_onto_axis(points: tuple[Point, ...], axis: Point) -> tuple[float, float]:
     projections = tuple(point[0] * axis[0] + point[1] * axis[1] for point in points)
     return min(projections), max(projections)
+
+
+def _signed_half_plane_value(p1: Point, p2: Point, q: Point) -> float:
+    return (p2[0] - p1[0]) * (q[1] - p1[1]) - (p2[1] - p1[1]) * (q[0] - p1[0])
 
 
 def _point_in_convex_polygon(point: Point, polygon: tuple[Point, ...]) -> bool:

@@ -10,6 +10,7 @@ import pytest
 
 from dot.conductors.cadata import resolve_conductor
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
+from dot.geometry.constraints import check_feasibility
 from dot.optimize import LayerConductorData, load_line_margin_objective
 from dot.optimize.operating_point import operating_point
 from dot.optimize.objectives import _peak_field_on_own_turns
@@ -211,6 +212,57 @@ def test_live_roxie_peak_field_and_margin_parity_cth_hf_and_mixed(tmp_path: Path
         comparison.margin_error_percentage_points < MARGIN_TOLERANCE_PERCENTAGE_POINTS
         for comparison in comparisons
     )
+
+
+def test_cth14t_design_passes_layer_nesting() -> None:
+    """The real CTH-14T design (ROXIE-verified valid) must pass C10 nesting.
+
+    dipole_designer's own test suite confirms this exact design passes its
+    C10 check (test_cth14t_passes_corrected_side_edge_c10); this is the
+    DOT-side equivalent, no live ROXIE call needed since layer nesting is a
+    pure geometric check.
+    """
+
+    result = check_feasibility(
+        _cth14t_design(),
+        aperture_radius_mm=16.6667,
+        min_gap_mm=0.15,
+        max_angle_deg=90.0,
+        enforce_layer_nesting=True,
+    )
+
+    assert not any(v.constraint_name == "layer_nesting" for v in result.violations), "\n".join(
+        v.message for v in result.violations if v.constraint_name == "layer_nesting"
+    )
+
+
+def test_cth14t_design_with_pole_ward_outer_block_fails_layer_nesting() -> None:
+    """A block moved too close to the pole must be caught by C10."""
+
+    design = _cth14t_design()
+    layers = list(design.layers)
+    perturbed_blocks = list(layers[1].blocks)
+    original = perturbed_blocks[0]
+    perturbed_blocks[0] = Block(
+        phi_deg=2.0,
+        alpha_deg=original.alpha_deg,
+        n_turns=original.n_turns,
+        cable=original.cable,
+        inner_radius_mm=original.inner_radius_mm,
+        current_a=original.current_a,
+    )
+    layers[1] = Layer(inner_radius_mm=layers[1].inner_radius_mm, blocks=tuple(perturbed_blocks))
+    perturbed_design = DipoleDesign(aperture_radius_mm=design.aperture_radius_mm, layers=tuple(layers))
+
+    result = check_feasibility(
+        perturbed_design,
+        aperture_radius_mm=16.6667,
+        min_gap_mm=0.15,
+        max_angle_deg=90.0,
+        enforce_layer_nesting=True,
+    )
+
+    assert any(v.constraint_name == "layer_nesting" for v in result.violations)
 
 
 def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:

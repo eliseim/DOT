@@ -55,6 +55,7 @@ class FeasibilitySettings:
     min_layer_clearance_mm: float = 0.1
     min_pole_gap_mm: float | None = None
     min_inter_block_gap_mm: float | None = None
+    enforce_layer_nesting: bool = False
 
 
 class DipoleOptimizationProblem(Problem):
@@ -144,6 +145,7 @@ class DipoleOptimizationProblem(Problem):
                     min_layer_clearance_mm=self.feasibility.min_layer_clearance_mm,
                     min_pole_gap_mm=self.feasibility.min_pole_gap_mm,
                     min_inter_block_gap_mm=self.feasibility.min_inter_block_gap_mm,
+                    enforce_layer_nesting=self.feasibility.enforce_layer_nesting,
                 )
                 if not feasibility.is_feasible:
                     objectives[row_index] = (_PENALTY, _PENALTY)

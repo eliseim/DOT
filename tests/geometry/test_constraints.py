@@ -10,6 +10,7 @@ from dot.geometry.constraints import (
     check_feasibility,
     check_inter_block_gap,
     check_inter_layer_spacing,
+    check_layer_nesting,
     check_midplane_clearance,
     check_pole_angle_limit,
     check_pole_clearance,
@@ -232,6 +233,65 @@ def test_feasibility_applies_inter_block_gap_when_configured() -> None:
     )
 
     assert any(v.constraint_name == "inter_block_gap" for v in result.violations)
+
+
+def test_layer_nesting_rejects_pole_ward_outer_layer_vertex() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    design = DipoleDesign(
+        aperture_radius_mm=6.0,
+        layers=(
+            Layer(inner_radius_mm=10.0, blocks=(inner_block,)),
+            Layer(inner_radius_mm=20.0, blocks=(outer_block,)),
+        ),
+    )
+
+    violations = check_layer_nesting(design)
+
+    assert violations
+    assert all(v.constraint_name == "layer_nesting" for v in violations)
+    assert all(v.layer_index == 1 and v.other_layer_index == 0 for v in violations)
+
+
+def test_feasibility_skips_layer_nesting_when_not_enforced() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    design = DipoleDesign(
+        aperture_radius_mm=6.0,
+        layers=(
+            Layer(inner_radius_mm=10.0, blocks=(inner_block,)),
+            Layer(inner_radius_mm=20.0, blocks=(outer_block,)),
+        ),
+    )
+
+    result = check_feasibility(design, aperture_radius_mm=6.0, min_gap_mm=0.0, max_angle_deg=90.0)
+
+    assert not any(v.constraint_name == "layer_nesting" for v in result.violations)
+
+
+def test_feasibility_applies_layer_nesting_when_enforced() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    design = DipoleDesign(
+        aperture_radius_mm=6.0,
+        layers=(
+            Layer(inner_radius_mm=10.0, blocks=(inner_block,)),
+            Layer(inner_radius_mm=20.0, blocks=(outer_block,)),
+        ),
+    )
+
+    result = check_feasibility(
+        design,
+        aperture_radius_mm=6.0,
+        min_gap_mm=0.0,
+        max_angle_deg=90.0,
+        enforce_layer_nesting=True,
+    )
+
+    assert any(v.constraint_name == "layer_nesting" for v in result.violations)
 
 
 def test_turn_non_intersection_accepts_edge_contact_between_stacked_turns() -> None:
