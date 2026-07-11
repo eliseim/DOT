@@ -79,12 +79,16 @@ class ConstructiveMixedVariableSampling(Sampling):
                 layer = self.topology.layers[layer_index]
                 radius_name = f"layer_{layer_index}_inner_radius_mm"
                 radius = float(sample[radius_name])
-                min_gap_deg = _minimum_phi_gap_deg(
+                cable_width = self.topology.cables[layer.cable_id].insulated_width_inner_mm
+                turn_counts = _sample_turn_counts(sample, layer_index, active_phi_variables)
+                phis = _ordered_phi_values(
+                    active_phi_variables,
+                    turn_counts,
                     radius,
-                    self.topology.cables[layer.cable_id].insulated_width_inner_mm,
+                    cable_width,
                     self.feasibility.min_gap_mm,
+                    rng,
                 )
-                phis = _ordered_phi_values(active_phi_variables, min_gap_deg, rng)
                 for name, phi in phis.items():
                     sample[name] = phi
 
@@ -122,18 +126,33 @@ class PhiOrderingRepair(Repair):
                 continue
 
             radius = float(sample[f"layer_{layer_index}_inner_radius_mm"])
-            min_gap_deg = _minimum_phi_gap_deg(
-                radius,
-                self.topology.cables[layer.cable_id].insulated_width_inner_mm,
-                self.feasibility.min_gap_mm,
-            )
+            cable_width = self.topology.cables[layer.cable_id].insulated_width_inner_mm
+            # genome_bounds() already partitions the layer's phi range into
+            # non-overlapping per-block windows in ascending block-index order
+            # (block 0 always gets the lowest sub-window) -- this repair must
+            # match that same ascending convention, not invert it.
+            ordered = sorted(phi_variables, key=lambda item: item.block_index)
+            # Turns stack from a block's own phi anchor toward increasing phi
+            # (see Block.turns()/_arc_stacked_anchor), so the gap required
+            # between block i and block i+1 is governed by block i's own
+            # n_turns, not block i+1's.
+            gaps = [
+                _minimum_phi_gap_deg(
+                    radius,
+                    cable_width,
+                    self.feasibility.min_gap_mm,
+                    n_turns=_sample_n_turns(sample, layer_index, variable.block_index),
+                )
+                for variable in ordered
+            ]
             sorted_phis = sorted(float(sample[variable.name]) for variable in phi_variables)
             previous = -math.inf
-            for remaining_index, variable in enumerate(sorted(phi_variables, key=lambda item: item.block_index)):
+            for remaining_index, variable in enumerate(ordered):
                 lower, upper = variable.bounds
-                remaining_after = len(phi_variables) - remaining_index - 1
-                max_phi = upper - remaining_after * min_gap_deg
-                repaired = max(lower, previous + min_gap_deg, sorted_phis[remaining_index])
+                required_gap = gaps[remaining_index - 1] if remaining_index > 0 else 0.0
+                remaining_gap_sum = sum(gaps[remaining_index : len(ordered) - 1])
+                max_phi = upper - remaining_gap_sum
+                repaired = max(lower, previous + required_gap, sorted_phis[remaining_index])
                 repaired = min(max_phi, repaired)
                 sample[variable.name] = float(min(max(repaired, lower), upper))
                 previous = float(sample[variable.name])
@@ -212,7 +231,16 @@ class TurnBudgetRepair(Repair):
 
 
 class CampaignRepair(Repair):
-    """Apply all mixed-variable structural repairs in a fixed sequence."""
+    """Apply all mixed-variable structural repairs in a fixed sequence.
+
+    Turn-budget repair runs first so that phi-ordering repair computes its
+    turn-count-aware gaps from each block's final, budget-compliant
+    ``n_turns`` rather than a pre-reduction value. Reversing the order is
+    still geometrically safe (phi gaps computed from an inflated n_turns
+    are only overly conservative, never insufficient, since
+    TurnBudgetRepair only ever reduces n_turns), but running turn-budget
+    repair first avoids that unnecessary conservatism.
+    """
 
     def __init__(self, topology: Topology, feasibility: FeasibilitySettings, targets: OptimizationTargets) -> None:
         super().__init__()
@@ -220,8 +248,8 @@ class CampaignRepair(Repair):
         self._turn_budget = TurnBudgetRepair(topology, targets)
 
     def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
-        x = self._phi_ordering._do(problem, x, **kwargs)
-        return self._turn_budget._do(problem, x, **kwargs)
+        x = self._turn_budget._do(problem, x, **kwargs)
+        return self._phi_ordering._do(problem, x, **kwargs)
 
 
 def run_campaign(
@@ -305,26 +333,54 @@ def _result_genomes(x, topology: Topology) -> np.ndarray:  # noqa: ANN001
     return np.atleast_2d(np.asarray(x, dtype=float))
 
 
-def _minimum_phi_gap_deg(radius_mm: float, cable_width_mm: float, min_gap_mm: float) -> float:
+def _minimum_phi_gap_deg(
+    radius_mm: float,
+    cable_width_mm: float,
+    min_gap_mm: float,
+    *,
+    n_turns: int = 1,
+) -> float:
+    """Minimum anchor-to-anchor gap so a block's real turn footprint clears its neighbor.
+
+    ``Block.turns()`` stacks each successive turn one insulated cable width
+    further from the block's own ``phi_deg`` anchor (toward increasing
+    phi) -- see ``_arc_stacked_anchor`` in ``dot.geometry.primitives``. So a
+    block with ``n_turns`` turns spans roughly ``n_turns`` cable widths of
+    angle starting at its anchor, not just one. The gap to the next block
+    (at higher phi) must clear that whole span plus the explicit
+    clearance, or ``check_turn_non_intersection`` will find real overlap
+    even though the anchors themselves look adequately spaced.
+    """
+
     radial_floor = max(1.0e-9, radius_mm)
     gap_angle = math.degrees(math.asin(min(1.0, max(0.0, min_gap_mm) / radial_floor)))
     cable_angle = math.degrees(math.asin(min(1.0, max(0.0, cable_width_mm) / radial_floor)))
-    return gap_angle + cable_angle
+    return gap_angle + cable_angle * max(1, int(n_turns))
 
 
 def _ordered_phi_values(
     phi_variables: list[tuple[str, int, tuple[float, float]]],
-    min_gap_deg: float,
+    turn_counts: dict[int, int],
+    radius_mm: float,
+    cable_width_mm: float,
+    min_gap_mm: float,
     rng: np.random.Generator,
 ) -> dict[str, float]:
     ordered = sorted(phi_variables, key=lambda item: item[1])
+    # gaps[i] is the gap required after block i (i.e. the transition from
+    # block i to block i+1), sized from block i's own n_turns.
+    gaps = [
+        _minimum_phi_gap_deg(radius_mm, cable_width_mm, min_gap_mm, n_turns=turn_counts.get(block_index, 1))
+        for _, block_index, _bounds in ordered
+    ]
     values: dict[str, float] = {}
     previous = -math.inf
     for remaining_index, (name, _block_index, bounds) in enumerate(ordered):
         lower, upper = bounds
-        min_phi = max(lower, previous + min_gap_deg)
-        remaining_after = len(ordered) - remaining_index - 1
-        max_phi = min(upper, upper - remaining_after * min_gap_deg)
+        required_gap = gaps[remaining_index - 1] if remaining_index > 0 else 0.0
+        min_phi = max(lower, previous + required_gap)
+        remaining_gap_sum = sum(gaps[remaining_index : len(ordered) - 1])
+        max_phi = min(upper, upper - remaining_gap_sum)
         if min_phi <= max_phi:
             phi = float(rng.uniform(min_phi, max_phi))
         else:
@@ -332,6 +388,21 @@ def _ordered_phi_values(
         values[name] = phi
         previous = phi
     return values
+
+
+def _sample_n_turns(sample: dict[str, float | int], layer_index: int, block_index: int) -> int:
+    return int(round(float(sample.get(f"layer_{layer_index}_block_{block_index}_n_turns", 1))))
+
+
+def _sample_turn_counts(
+    sample: dict[str, float | int],
+    layer_index: int,
+    phi_variables: list[tuple[str, int, tuple[float, float]]],
+) -> dict[int, int]:
+    return {
+        block_index: _sample_n_turns(sample, layer_index, block_index)
+        for _name, block_index, _bounds in phi_variables
+    }
 
 
 def _block_is_active(sample: dict[str, float | int], layer_index: int, block_index: int) -> bool:
