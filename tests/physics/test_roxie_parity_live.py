@@ -214,6 +214,31 @@ def test_live_roxie_peak_field_and_margin_parity_cth_hf_and_mixed(tmp_path: Path
     )
 
 
+def test_cth14t_design_passes_corrected_pole_angle_limit() -> None:
+    """The real CTH-14T design must pass the corrected (minimum-from-pole) C17.
+
+    dipole_designer's own test suite confirms this exact design's Layer 1
+    pole-edge angle is ~74.84deg (dd convention) against an 80deg limit
+    (test_cth14t_passes_c17_actual_layer1_pole_edge_limit). DOT's
+    equivalent, corrected check requires every vertex's angle-from-pole to
+    be >= 90-80=10deg; this design's actual closest-to-pole vertex is
+    ~15.19deg, clear of that minimum. Before the fix, DOT's inverted
+    "maximum angle-from-pole" check would have rejected this real, valid
+    design outright (its own midplane block naturally reaches ~89.8deg).
+    """
+
+    result = check_feasibility(
+        _cth14t_design(),
+        aperture_radius_mm=16.6667,
+        min_gap_mm=0.15,
+        max_angle_deg=(80.0, 85.0, 85.0, 85.0),
+    )
+
+    assert not any(v.constraint_name == "pole_angle_limit" for v in result.violations), "\n".join(
+        v.message for v in result.violations if v.constraint_name == "pole_angle_limit"
+    )
+
+
 def test_cth14t_design_passes_layer_nesting() -> None:
     """The real CTH-14T design (ROXIE-verified valid) must pass C10 nesting.
 
