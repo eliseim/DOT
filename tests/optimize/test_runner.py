@@ -18,7 +18,7 @@ from dot.optimize import (
     genome_bounds,
     load_line_margin_objective,
 )
-from dot.optimize.genome import flatten_mixed_genome
+from dot.optimize.genome import flatten_mixed_genome, genome_variables
 from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
 from dot.optimize.runner import (
     ConstructiveMixedVariableSampling,
@@ -365,6 +365,63 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
         topology.layers[0].phi_bounds_deg[0] <= phi <= topology.layers[0].phi_bounds_deg[1]
         for phi in phis
     )
+
+
+def test_phi_ordering_repair_spreads_slack_instead_of_pinning_to_window_floor() -> None:
+    # task 0046: a prior greedy floor-clamp assigned each block the
+    # smallest value satisfying ordering/gaps against the previous block,
+    # so any block whose proposed value didn't already clear that floor
+    # snapped to EXACTLY its own genome-space window's lower bound --
+    # using none of that window's interior no matter how wide it was.
+    # Confirmed empirically: a fully collapsed sample (every block
+    # proposing the same low phi) used to repair to every block sitting
+    # precisely at its window's lower edge. The slack-packing replacement
+    # must instead land every block well inside its own window, with
+    # roughly even gaps throughout -- not just concentrated at one edge.
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    collapsed_phi = topology.layers[0].phi_bounds_deg[0]
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": collapsed_phi,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": collapsed_phi,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": collapsed_phi,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": True,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": collapsed_phi,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": True,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+
+    repaired = PhiOrderingRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
+    bounds_by_block = {
+        v.block_index: v.bounds
+        for v in genome_variables(topology)
+        if v.layer_index == 0 and v.block_index is not None and v.name.endswith("_phi_deg")
+    }
+    phis = [float(repaired[f"layer_0_block_{index}_phi_deg"]) for index in range(4)]
+
+    # Every block must land strictly inside its own window's interior, not
+    # pinned to the window's lower edge (the old, buggy behavior).
+    for block_index, phi in enumerate(phis):
+        lower, upper = bounds_by_block[block_index]
+        window_width = upper - lower
+        assert phi > lower + 0.1 * window_width, (
+            f"block {block_index} landed at {phi}, within 10% of its window's lower "
+            f"edge {lower} (window {lower}-{upper}) -- slack was not spread"
+        )
+
+    # Gaps between consecutive (pole-to-midplane-sorted) positions should be
+    # roughly even, not concentrated entirely in one gap.
+    sorted_phis = sorted(phis)
+    gaps = [right - left for left, right in zip(sorted_phis, sorted_phis[1:], strict=False)]
+    assert min(gaps) > 0.5 * max(gaps), f"gaps are unevenly concentrated: {gaps}"
 
 
 def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:
