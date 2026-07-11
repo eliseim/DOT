@@ -145,6 +145,38 @@ def check_midplane_clearance(
     return violations
 
 
+def check_pole_clearance(
+    design: DipoleDesign,
+    min_gap_mm: float,
+) -> list[Violation]:
+    """Check every turn remains at least ``min_gap_mm`` clear of x=0 (the pole axis).
+
+    The pole-side counterpart to :func:`check_midplane_clearance`: no turn
+    may cross into the adjacent quadrant through the y-axis, mirroring the
+    fixed-mm pole gap convention used by ROXIE-consistent designs (distinct
+    from any angular pole-edge limit).
+    """
+
+    violations: list[Violation] = []
+    for indexed in _iter_indexed_turns(design):
+        min_x = min(x for x, _ in indexed.turn.corners)
+        if min_x < min_gap_mm - _EPSILON:
+            violations.append(
+                Violation(
+                    constraint_name="pole_clearance",
+                    message=(
+                        f"Turn one-sided pole clearance {min_x:.6g} mm "
+                        f"is below required {min_gap_mm:.6g} mm."
+                    ),
+                    severity=min_gap_mm - min_x,
+                    layer_index=indexed.layer_index,
+                    block_index=indexed.block_index,
+                    turn_index=indexed.turn_index,
+                )
+            )
+    return violations
+
+
 def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
     """Check all turn quadrilaterals are free of positive-area overlap."""
 
@@ -210,6 +242,7 @@ def check_feasibility(
     min_gap_mm: float,
     max_angle_deg: float | Sequence[float],
     min_layer_clearance_mm: float = 0.1,
+    min_pole_gap_mm: float | None = None,
 ) -> FeasibilityResult:
     """Run all geometry feasibility constraints and aggregate violations."""
 
@@ -217,6 +250,8 @@ def check_feasibility(
     violations.extend(check_aperture_clearance(design, aperture_radius_mm))
     violations.extend(check_inter_layer_spacing(design, min_layer_clearance_mm))
     violations.extend(check_midplane_clearance(design, min_gap_mm))
+    if min_pole_gap_mm is not None:
+        violations.extend(check_pole_clearance(design, min_pole_gap_mm))
     violations.extend(check_turn_non_intersection(design))
     violations.extend(check_pole_angle_limit(design, max_angle_deg))
     return FeasibilityResult(is_feasible=not violations, violations=tuple(violations))

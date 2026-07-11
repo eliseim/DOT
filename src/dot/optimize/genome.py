@@ -192,8 +192,17 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
         lower.append(layer.inner_radius_bounds_mm[0])
         upper.append(layer.inner_radius_bounds_mm[1])
         for block_index in range(layer.n_blocks):
-            block_phi_lower = phi_lower + block_index * window_width
-            block_phi_upper = phi_lower + (block_index + 1) * window_width
+            # Block index 0 has alpha_deg hard-fixed to 0 (see decode()),
+            # which is only geometrically valid near the midplane
+            # (phi_deg=90, per primitives.py's phi convention). So block 0
+            # must get the window closest to phi_upper (the midplane side)
+            # and increasing block index must move toward phi_lower (the
+            # pole side), where the free alpha gene on blocks 1..n-1 can
+            # compensate. This matches the verified reference convention
+            # in dipole_designer (blocks stored ascending pole-ward from
+            # the midplane block, which is always alpha=0).
+            block_phi_lower = phi_upper - (block_index + 1) * window_width
+            block_phi_upper = phi_upper - block_index * window_width
             lower.extend((block_phi_lower, float(layer.n_turns_bounds[0])))
             upper.extend((block_phi_upper, float(layer.n_turns_bounds[1])))
             if block_index > 0:

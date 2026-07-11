@@ -220,23 +220,27 @@ def test_genome_bounds_match_topology_order() -> None:
 
     assert lower.shape == (topology.n_var,)
     assert upper.shape == (topology.n_var,)
+    # Block 0 has alpha_deg hard-fixed to 0 (see genome.py decode()), which
+    # is only geometrically valid near the midplane (phi_deg=90), so it
+    # gets the window closest to phi_upper; increasing block index moves
+    # toward phi_lower (the pole), where the free alpha gene compensates.
     assert lower.tolist() == pytest.approx(
         [
             10.0,
-            5.0,
-            1.0,
                 32.5,
+            1.0,
+            5.0,
                 1.0,
                 0.0,
                 -10.0,
                 22.0,
-                15.0,
+                58.333333333333336,
             1.0,
                 36.66666666666667,
                 1.0,
                 0.0,
                 -5.0,
-                58.333333333333336,
+                15.0,
                 1.0,
                 0.0,
                 -5.0,
@@ -245,20 +249,20 @@ def test_genome_bounds_match_topology_order() -> None:
     assert upper.tolist() == pytest.approx(
         [
             20.0,
-            32.5,
-            5.0,
                 60.0,
+            5.0,
+            32.5,
                 5.0,
                 1.0,
                 70.0,
                 30.0,
-                36.66666666666667,
+                80.0,
             6.0,
                 58.333333333333336,
                 6.0,
                 1.0,
                 68.0,
-                80.0,
+                36.66666666666667,
                 6.0,
                 1.0,
                 68.0,
@@ -283,9 +287,11 @@ def test_genome_bounds_partitions_four_block_phi_window() -> None:
 
     lower, upper = genome_bounds(topology)
 
+    # Block 0 gets the window nearest phi_upper (midplane); increasing block
+    # index moves toward phi_lower (pole).
     phi_slots = [1, 3, 7, 11]
-    assert lower[phi_slots].tolist() == pytest.approx([2.0, 21.0, 40.0, 59.0])
-    assert upper[phi_slots].tolist() == pytest.approx([21.0, 40.0, 59.0, 78.0])
+    assert lower[phi_slots].tolist() == pytest.approx([59.0, 40.0, 21.0, 2.0])
+    assert upper[phi_slots].tolist() == pytest.approx([78.0, 59.0, 40.0, 21.0])
 
 
 def test_genome_bounds_leaves_single_block_phi_bounds_unchanged() -> None:
@@ -337,7 +343,11 @@ def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -
     new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
 
     assert old_feasible == 42
-    assert new_feasible == 177
+    # Block 0 now gets the window nearest phi_upper (midplane) instead of
+    # phi_lower (pole) -- same random draws land in different windows, so
+    # the exact feasible count differs from before that fix, but the
+    # material improvement over the unpartitioned baseline still holds.
+    assert new_feasible == 182
     assert new_feasible >= old_feasible + 50
 
 

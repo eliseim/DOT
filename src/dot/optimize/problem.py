@@ -53,6 +53,7 @@ class FeasibilitySettings:
     min_gap_mm: float
     max_angle_deg: float | Sequence[float]
     min_layer_clearance_mm: float = 0.1
+    min_pole_gap_mm: float | None = None
 
 
 class DipoleOptimizationProblem(Problem):
@@ -140,6 +141,7 @@ class DipoleOptimizationProblem(Problem):
                     min_gap_mm=self.feasibility.min_gap_mm,
                     max_angle_deg=self.feasibility.max_angle_deg,
                     min_layer_clearance_mm=self.feasibility.min_layer_clearance_mm,
+                    min_pole_gap_mm=self.feasibility.min_pole_gap_mm,
                 )
                 if not feasibility.is_feasible:
                     objectives[row_index] = (_PENALTY, _PENALTY)

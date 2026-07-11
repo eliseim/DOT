@@ -11,6 +11,7 @@ from dot.geometry.constraints import (
     check_inter_layer_spacing,
     check_midplane_clearance,
     check_pole_angle_limit,
+    check_pole_clearance,
     check_turn_non_intersection,
 )
 
@@ -120,6 +121,57 @@ def test_midplane_clearance_rejects_hand_computed_gap() -> None:
     assert violations[0].block_index == 0
     assert violations[0].turn_index == 0
     assert violations[0].severity == pytest.approx(0.3)
+
+
+def test_pole_clearance_accepts_hand_computed_gap() -> None:
+    design = _pole_reference_design()
+    # alpha=0 fixes the width axis along global Y (not X, see primitives.py's
+    # absolute-alpha convention), so the cable width offset does not move
+    # any corner's x-coordinate here -- min_x is exactly the anchor's own
+    # x = r*sin(phi_deg).
+    hand_computed_lowest_x_mm = 10.0 * math.sin(math.radians(30.0))
+
+    assert hand_computed_lowest_x_mm == pytest.approx(5.0, rel=0.0, abs=1.0e-12)
+    assert check_pole_clearance(design, min_gap_mm=5.0) == []
+
+
+def test_pole_clearance_rejects_hand_computed_gap() -> None:
+    design = _pole_reference_design()
+
+    violations = check_pole_clearance(design, min_gap_mm=5.3)
+
+    assert [violation.constraint_name for violation in violations] == ["pole_clearance"]
+    assert violations[0].layer_index == 0
+    assert violations[0].block_index == 0
+    assert violations[0].turn_index == 0
+    assert violations[0].severity == pytest.approx(0.3)
+
+
+def test_feasibility_skips_pole_clearance_when_not_configured() -> None:
+    design = _pole_reference_design()
+
+    result = check_feasibility(
+        design,
+        aperture_radius_mm=1.0,
+        min_gap_mm=0.0,
+        max_angle_deg=90.0,
+    )
+
+    assert not any(v.constraint_name == "pole_clearance" for v in result.violations)
+
+
+def test_feasibility_applies_pole_clearance_when_configured() -> None:
+    design = _pole_reference_design()
+
+    result = check_feasibility(
+        design,
+        aperture_radius_mm=1.0,
+        min_gap_mm=0.0,
+        max_angle_deg=90.0,
+        min_pole_gap_mm=5.3,
+    )
+
+    assert any(v.constraint_name == "pole_clearance" for v in result.violations)
 
 
 def test_turn_non_intersection_accepts_edge_contact_between_stacked_turns() -> None:
@@ -287,6 +339,14 @@ def _midplane_reference_design() -> DipoleDesign:
     return DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(_layer(inner_radius_mm=10.0, phi_deg=60.0, cable=cable),),
+    )
+
+
+def _pole_reference_design() -> DipoleDesign:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    return DipoleDesign(
+        aperture_radius_mm=6.0,
+        layers=(_layer(inner_radius_mm=10.0, phi_deg=30.0, cable=cable),),
     )
 
 
