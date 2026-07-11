@@ -24,6 +24,7 @@ from .problem import (
     MarginEvaluationExclusion,
     OptimizationTargets,
 )
+from .topology_survival import TopologyAwareRankAndCrowding, TopologySurvivalConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,11 +626,12 @@ def run_campaign(
     pop_size: int = 8,
     n_gen: int = 3,
     seed: int | None = None,
+    topology_survival: TopologySurvivalConfig | None = None,
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
     problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
-    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets, topology_survival)
 
     def _advance_generation(algorithm) -> None:  # noqa: ANN001
         problem.set_generation(algorithm.n_gen)
@@ -670,6 +672,7 @@ def _mixed_variable_nsga2(
     feasibility: FeasibilitySettings,
     pop_size: int,
     targets: OptimizationTargets | None = None,
+    topology_survival: TopologySurvivalConfig | None = None,
 ) -> NSGA2:
     # pymoo's default duplicate elimination converts X to a float array, which
     # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
@@ -684,11 +687,13 @@ def _mixed_variable_nsga2(
             temperature_k=0.0,
         )
     repair = CampaignRepair(topology, feasibility, targets)
+    survival = TopologyAwareRankAndCrowding(topology_survival or TopologySurvivalConfig())
     return NSGA2(
         pop_size=pop_size,
         sampling=ConstructiveMixedVariableSampling(topology, feasibility),
         mating=MixedVariableMating(repair=repair, eliminate_duplicates=duplicate_elimination),
         eliminate_duplicates=duplicate_elimination,
+        survival=survival,
     )
 
 

@@ -14,6 +14,7 @@ from dot.geometry.constraints import check_feasibility
 from .genome import Topology, decode, flatten_mixed_genome, genome_bounds, mixed_variable_spec
 from .objectives import LayerConductorData, field_quality_objective, load_line_margin_objective
 from .operating_point import operating_point
+from .topology_survival import topology_family
 
 _PENALTY = 1.0e12
 _START_HARMONIC_RELAXATION_MULTIPLIER = 10.0
@@ -226,11 +227,16 @@ class DipoleOptimizationProblem(Problem):
             rows = np.atleast_2d(np.asarray(x, dtype=float))
         objectives = np.empty((rows.shape[0], 2), dtype=float)
         constraints = np.zeros((rows.shape[0], self.n_ieq_constr), dtype=float)
+        # task 0045: attached for TopologyAwareRankAndCrowding's family-quota
+        # survival. "invalid" is the fallback for rows whose genome fails to
+        # decode at all (caught below) -- those never get a real fingerprint.
+        families = np.full(rows.shape[0], "invalid", dtype=object)
         harmonic_threshold_units, margin_threshold_percent, current_threshold_a = self.admission_thresholds()
 
         for row_index, row in enumerate(rows):
             try:
                 unit_design = decode(row, self.topology, self.cable_map)
+                families[row_index] = topology_family(unit_design)
                 feasibility = check_feasibility(
                     unit_design,
                     aperture_radius_mm=self.topology.aperture_radius_mm,
@@ -317,3 +323,4 @@ class DipoleOptimizationProblem(Problem):
 
         out["F"] = objectives
         out["G"] = constraints
+        out["topology_family"] = families
