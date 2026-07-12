@@ -648,24 +648,30 @@ def run_campaign(
     topology_survival: TopologySurvivalConfig | None = None,
     adaptive_offspring: bool = False,
     refinement: "RefinementConfig | None" = None,
+    n_workers: int | None = None,
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates."""
 
-    problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=n_gen)
+    problem = DipoleOptimizationProblem(
+        topology, targets, feasibility, total_generations=n_gen, n_workers=n_workers
+    )
     algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets, topology_survival, adaptive_offspring)
 
     def _advance_generation(algorithm) -> None:  # noqa: ANN001
         problem.set_generation(algorithm.n_gen)
         refresh_population_admission(problem, algorithm.pop)
 
-    result = minimize(
-        problem,
-        algorithm,
-        ("n_gen", n_gen),
-        seed=seed,
-        callback=_advance_generation,
-        verbose=False,
-    )
+    try:
+        result = minimize(
+            problem,
+            algorithm,
+            ("n_gen", n_gen),
+            seed=seed,
+            callback=_advance_generation,
+            verbose=False,
+        )
+    finally:
+        problem.close()
 
     genomes = _result_genomes(result.X, topology)
     objectives = np.atleast_2d(result.F) if result.F is not None else np.empty((0, 2))

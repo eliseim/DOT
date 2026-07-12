@@ -61,6 +61,38 @@ def test_problem_accepts_feasible_genome() -> None:
     assert f_values[1] < 0.0
 
 
+def test_parallel_evaluation_matches_sequential_exactly() -> None:
+    # task 0050: population evaluation can be distributed across a process
+    # pool for speed -- must produce IDENTICAL objective/constraint arrays
+    # to the sequential path, since it's the same computation just
+    # distributed, not an approximation.
+    topology = _topology()
+    targets = _targets(max_harmonic_units=10.0, min_margin_percent=15.0, max_current_a=13000.0)
+    feasibility = _feasibility()
+    batch = np.asarray(
+        [
+            [12.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0],  # feasible
+            [12.0, 20.0, 1.0, 20.0, 1.0, 1.0, 0.0],  # geometry-infeasible (overlap)
+            [8.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0],  # different radius, feasible-ish
+            [14.0, 45.0, 2.0, 12.0, 2.0, 2.0, 1.0],  # different genome entirely
+        ]
+    )
+
+    sequential_problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=5)
+    sequential_problem.set_generation(3)
+    seq_f, seq_g = sequential_problem.evaluate(batch, return_values_of=["F", "G"])
+
+    parallel_problem = DipoleOptimizationProblem(topology, targets, feasibility, total_generations=5, n_workers=2)
+    parallel_problem.set_generation(3)
+    try:
+        par_f, par_g = parallel_problem.evaluate(batch, return_values_of=["F", "G"])
+    finally:
+        parallel_problem.close()
+
+    np.testing.assert_array_equal(seq_f, par_f)
+    np.testing.assert_array_equal(seq_g, par_g)
+
+
 def test_problem_compares_harmonic_constraint_without_erroneous_1e4_rescale() -> None:
     # field_quality_objective's raw return value is already in CERN/European
     # relative "units" (multipole_coefficients' own docstring: "multiplied
