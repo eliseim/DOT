@@ -111,6 +111,95 @@ def _targets() -> OptimizationTargets:
     )
 
 
+def test_mixed_turn_refinement_lets_margin_move_unlike_angle_only() -> None:
+    # task 0049: campaign9 (a real, full-scale run) proved angle-only
+    # refinement can slash harmonic content but never moves load-line
+    # margin at all -- every refined candidate landed in the seed's
+    # narrow margin band, since turns/current (which govern margin) were
+    # frozen. Mixed-turn refinement unfreezes turns; this must produce a
+    # visibly WIDER margin spread than angle-only refinement on the same
+    # seed, and must actually vary total turn count.
+    seed = _turn_growable_seed()
+    targets = _targets()
+    feasibility = _feasibility()
+
+    angle_only_config = RefinementConfig(
+        enabled=True, population=10, generations=3,
+        angular_mutation_probability=0.5, angular_mutation_sigma_deg=1.0,
+        mixed_turn_enabled=False,
+    )
+    angle_only = run_refinement(targets, feasibility, (seed,), angle_only_config, random_state=np.random.default_rng(0))
+    angle_only_margins = [-c.objectives[1] for c in angle_only.candidates]
+    assert angle_only_margins
+
+    mixed_config = RefinementConfig(
+        enabled=True, population=10, generations=3,
+        angular_mutation_probability=0.5, angular_mutation_sigma_deg=1.0,
+        mixed_turn_enabled=True, turn_mutation_probability=0.6, turn_step=1,
+        preserve_layer_total_probability=0.0, max_total_turns=10,
+    )
+    mixed = run_refinement(targets, feasibility, (seed,), mixed_config, random_state=np.random.default_rng(0))
+    mixed_margins = [-c.objectives[1] for c in mixed.candidates]
+    mixed_turns = {sum(b.n_turns for l in c.design.layers for b in l.blocks) for c in mixed.candidates}
+    assert mixed_margins
+
+    assert (max(mixed_margins) - min(mixed_margins)) > 5.0 * (max(angle_only_margins) - min(angle_only_margins)), (
+        "mixed-turn refinement should spread margin far more than angle-only refinement on the same seed"
+    )
+    assert len(mixed_turns) > 1, "total turn count should actually vary across mixed-turn candidates"
+
+
+def test_mixed_turn_refinement_respects_max_total_turns_budget() -> None:
+    seed = _turn_growable_seed()
+    targets = _targets()
+    feasibility = _feasibility()
+    config = RefinementConfig(
+        enabled=True, population=10, generations=4,
+        angular_mutation_probability=0.0,
+        mixed_turn_enabled=True, turn_mutation_probability=0.9, turn_step=1,
+        preserve_layer_total_probability=0.0, max_total_turns=6,
+    )
+
+    result = run_refinement(targets, feasibility, (seed,), config, random_state=np.random.default_rng(2))
+
+    assert result.candidates
+    for candidate in result.candidates:
+        total_turns = sum(b.n_turns for l in candidate.design.layers for b in l.blocks)
+        assert total_turns <= 6
+
+
+def test_mixed_turn_refinement_keeps_active_block_pattern_and_radius_frozen() -> None:
+    seed = _turn_growable_seed()
+    targets = _targets()
+    feasibility = _feasibility()
+    config = RefinementConfig(
+        enabled=True, population=10, generations=3,
+        angular_mutation_probability=0.5, angular_mutation_sigma_deg=1.0,
+        mixed_turn_enabled=True, turn_mutation_probability=0.6, turn_step=1,
+        preserve_layer_total_probability=0.0, max_total_turns=10,
+    )
+
+    result = run_refinement(targets, feasibility, (seed,), config, random_state=np.random.default_rng(0))
+
+    assert result.candidates
+    for candidate in result.candidates:
+        assert len(candidate.design.layers) == len(seed.design.layers)
+        for layer, seed_layer in zip(candidate.design.layers, seed.design.layers, strict=True):
+            assert layer.inner_radius_mm == seed_layer.inner_radius_mm
+            assert len(layer.blocks) == len(seed_layer.blocks)
+            for block, seed_block in zip(layer.blocks, seed_layer.blocks, strict=True):
+                assert block.cable == seed_block.cable
+                assert block.inner_radius_mm == seed_block.inner_radius_mm
+
+
+def _turn_growable_seed() -> ParetoCandidate:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
+    block0 = Block(phi_deg=70.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=100.0)
+    block1 = Block(phi_deg=40.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=100.0)
+    design = DipoleDesign(aperture_radius_mm=8.0, layers=(Layer(inner_radius_mm=20.0, blocks=(block0, block1)),))
+    return ParetoCandidate(genome=np.empty(0), design=design, objectives=(1.0, -10.0))
+
+
 def _feasibility() -> FeasibilitySettings:
     return FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0, min_inter_block_gap_mm=1.0)
 

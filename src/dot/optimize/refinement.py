@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from dot.geometry import DipoleDesign, Layer
+from dot.geometry import Block, DipoleDesign, Layer
 from dot.geometry.constraints import check_feasibility
 
 from .objectives import field_quality_objective, load_line_margin_objective
@@ -45,6 +45,22 @@ class RefinementConfig:
     generations: int = 3
     angular_mutation_probability: float = 0.7
     angular_mutation_sigma_deg: float = 1.0
+    # task 0049: dd's "mixed-turn refinement" -- angle-only refinement
+    # (task 0048) proved it can drive harmonic content down sharply but
+    # cannot move load-line margin at all, since margin is governed by
+    # turns/current, both frozen by angle-only perturbation. Unfreezing
+    # turns here lets refinement explore that axis too, directly around a
+    # seed that already has good field quality.
+    mixed_turn_enabled: bool = False
+    turn_mutation_probability: float = 0.35
+    turn_step: int = 1
+    # Probability that a turn mutation TRANSFERS turn_step turns between
+    # two blocks in the same layer (preserving that layer's -- and the
+    # design's -- total turn count) rather than growing/shrinking one
+    # block's turns unilaterally (letting the total drift, bounded by
+    # max_total_turns).
+    preserve_layer_total_probability: float = 0.8
+    max_total_turns: int | None = None
 
 
 def select_refinement_seeds(
@@ -121,7 +137,7 @@ def _refine_one_seed(
     found: list[ParetoCandidate] = []
     current = seed.design
     for _generation in range(config.generations):
-        offspring = [_perturb_angles(current, rng, config) for _ in range(config.population)]
+        offspring = [_perturb_design(current, rng, config) for _ in range(config.population)]
         generation_results: list[ParetoCandidate] = []
         for design in offspring:
             candidate = _evaluate_if_feasible(design, targets, feasibility)
@@ -169,28 +185,80 @@ def _evaluate_if_feasible(
     )
 
 
-def _perturb_angles(
+def _perturb_design(
     design: DipoleDesign,
     rng: np.random.Generator,
     config: RefinementConfig,
 ) -> DipoleDesign:
+    """Perturb phi/alpha (always) and, if enabled, turn counts (task 0049).
+
+    Active-block pattern, cable, and radius stay frozen either way -- only
+    the number of new perturbation KINDS grows (turns joins phi/alpha),
+    never the set of frozen structural parameters.
+    """
+
     layers = []
     for layer in design.layers:
-        blocks = []
-        for block_index, block in enumerate(layer.blocks):
-            if rng.random() >= config.angular_mutation_probability:
-                blocks.append(block)
-                continue
-            phi_delta = float(rng.normal(0.0, config.angular_mutation_sigma_deg))
-            # Block 0 of every layer keeps alpha_deg=0.0 -- DOT's own
-            # invariant (only valid near the midplane, structurally
-            # hard-fixed everywhere else in the genome).
-            if block_index == 0:
-                blocks.append(replace(block, phi_deg=block.phi_deg + phi_delta))
-            else:
-                alpha_delta = float(rng.normal(0.0, config.angular_mutation_sigma_deg))
-                blocks.append(
-                    replace(block, phi_deg=block.phi_deg + phi_delta, alpha_deg=block.alpha_deg + alpha_delta)
-                )
+        blocks = _perturb_turns(list(layer.blocks), rng, config) if config.mixed_turn_enabled else list(layer.blocks)
+        blocks = [_perturb_block_angles(block_index, block, rng, config) for block_index, block in enumerate(blocks)]
         layers.append(Layer(inner_radius_mm=layer.inner_radius_mm, blocks=tuple(blocks)))
-    return DipoleDesign(aperture_radius_mm=design.aperture_radius_mm, layers=tuple(layers))
+    perturbed = DipoleDesign(aperture_radius_mm=design.aperture_radius_mm, layers=tuple(layers))
+
+    if config.max_total_turns is not None:
+        total_turns = sum(block.n_turns for layer in perturbed.layers for block in layer.blocks)
+        if total_turns > config.max_total_turns:
+            # Turn mutation pushed past the budget -- revert turns (keep
+            # the angle perturbation, which is always budget-safe since it
+            # never touches turn counts).
+            return _perturb_design(design, rng, replace(config, mixed_turn_enabled=False))
+
+    return perturbed
+
+
+def _perturb_block_angles(
+    block_index: int,
+    block: Block,
+    rng: np.random.Generator,
+    config: RefinementConfig,
+) -> Block:
+    if rng.random() >= config.angular_mutation_probability:
+        return block
+    phi_delta = float(rng.normal(0.0, config.angular_mutation_sigma_deg))
+    # Block 0 of every layer keeps alpha_deg=0.0 -- DOT's own invariant
+    # (only valid near the midplane, structurally hard-fixed everywhere
+    # else in the genome).
+    if block_index == 0:
+        return replace(block, phi_deg=block.phi_deg + phi_delta)
+    alpha_delta = float(rng.normal(0.0, config.angular_mutation_sigma_deg))
+    return replace(block, phi_deg=block.phi_deg + phi_delta, alpha_deg=block.alpha_deg + alpha_delta)
+
+
+def _perturb_turns(
+    blocks: list[Block],
+    rng: np.random.Generator,
+    config: RefinementConfig,
+) -> list[Block]:
+    if rng.random() >= config.turn_mutation_probability:
+        return blocks
+
+    if len(blocks) >= 2 and rng.random() < config.preserve_layer_total_probability:
+        donor_index, recipient_index = rng.choice(len(blocks), size=2, replace=False)
+        donor = blocks[donor_index]
+        if donor.n_turns - config.turn_step >= 1:
+            blocks = list(blocks)
+            blocks[donor_index] = replace(donor, n_turns=donor.n_turns - config.turn_step)
+            recipient = blocks[recipient_index]
+            blocks[recipient_index] = replace(recipient, n_turns=recipient.n_turns + config.turn_step)
+        return blocks
+
+    # Grow or shrink a single block's turns -- the design's total turn
+    # count is allowed to drift, bounded by max_total_turns in the caller.
+    index = int(rng.integers(0, len(blocks)))
+    block = blocks[index]
+    direction = 1 if rng.random() < 0.5 else -1
+    new_turns = block.n_turns + direction * config.turn_step
+    if new_turns < 1:
+        return blocks
+    blocks = list(blocks)
+    blocks[index] = replace(block, n_turns=new_turns)
+    return blocks
