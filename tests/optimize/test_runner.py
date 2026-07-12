@@ -233,6 +233,21 @@ def test_run_campaign_with_adaptive_offspring_still_produces_candidates() -> Non
     assert result.candidates
 
 
+def test_run_campaign_with_parallel_workers_still_produces_candidates() -> None:
+    topology = _topology()
+    result = run_campaign(
+        topology,
+        _targets(),
+        _feasibility(),
+        pop_size=8,
+        n_gen=3,
+        seed=7,
+        n_workers=2,
+    )
+
+    assert result.candidates
+
+
 def test_run_campaign_with_refinement_still_produces_candidates() -> None:
     from dot.optimize.refinement import RefinementConfig
 

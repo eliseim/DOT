@@ -11,6 +11,7 @@ from pymoo.core.problem import Problem
 from dot.geometry import CableSpec
 from dot.geometry.constraints import check_feasibility
 
+from . import objectives as _objectives_module
 from .genome import Topology, decode, flatten_mixed_genome, genome_bounds, mixed_variable_spec
 from .objectives import LayerConductorData, field_quality_objective, load_line_margin_objective
 from .operating_point import operating_point
@@ -145,6 +146,7 @@ class DipoleOptimizationProblem(Problem):
         feasibility: FeasibilitySettings,
         cable_map: Mapping[str, CableSpec] | None = None,
         total_generations: int = 1,
+        n_workers: int | None = None,
     ) -> None:
         self.topology = topology
         self.targets = targets
@@ -166,6 +168,47 @@ class DipoleOptimizationProblem(Problem):
             xu=upper,
             vars=mixed_variable_spec(topology),
         )
+        # task 0050: load_line_margin_objective costs up to ~3s/eval at high
+        # turn counts (near-field cost grows with total conductor count),
+        # making deep campaigns at the turn counts needed for realistic
+        # margins impractically slow. Population evaluation is
+        # embarrassingly parallel (each row is independent), so distribute
+        # it across a persistent process pool when requested -- same
+        # computation, just distributed, zero numerical risk. The pool is
+        # created once here and reused across every generation's
+        # _evaluate() call (creating a fresh pool per generation would
+        # waste most of the win on process-spawn overhead).
+        self._executor = None
+        if n_workers is not None and n_workers > 1:
+            import concurrent.futures
+
+            self._executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker,
+                initargs=(
+                    topology,
+                    self.cable_map,
+                    feasibility,
+                    targets,
+                    self.n_ieq_constr,
+                    _objectives_module.PEAK_FIELD_FILAMENTS_PER_AXIS,
+                ),
+            )
+
+    def close(self) -> None:
+        """Shut down the worker pool, if one was created."""
+
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if close() was never called explicitly --
+        # ProcessPoolExecutor does not reliably self-terminate on GC.
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_generation(self, generation: int) -> None:
         """Set the 1-indexed generation used by annealed target admission."""
@@ -229,98 +272,169 @@ class DipoleOptimizationProblem(Problem):
         constraints = np.zeros((rows.shape[0], self.n_ieq_constr), dtype=float)
         # task 0045: attached for TopologyAwareRankAndCrowding's family-quota
         # survival. "invalid" is the fallback for rows whose genome fails to
-        # decode at all (caught below) -- those never get a real fingerprint.
+        # decode at all -- those never get a real fingerprint.
         families = np.full(rows.shape[0], "invalid", dtype=object)
         harmonic_threshold_units, margin_threshold_percent, current_threshold_a = self.admission_thresholds()
 
-        for row_index, row in enumerate(rows):
-            try:
-                unit_design = decode(row, self.topology, self.cable_map)
-                families[row_index] = topology_family(unit_design)
-                feasibility = check_feasibility(
-                    unit_design,
-                    aperture_radius_mm=self.topology.aperture_radius_mm,
-                    min_gap_mm=self.feasibility.min_gap_mm,
-                    max_angle_deg=self.feasibility.max_angle_deg,
-                    min_layer_clearance_mm=self.feasibility.min_layer_clearance_mm,
-                    min_pole_gap_mm=self.feasibility.min_pole_gap_mm,
-                    min_inter_block_gap_mm=self.feasibility.min_inter_block_gap_mm,
-                    enforce_layer_nesting=self.feasibility.enforce_layer_nesting,
+        if self._executor is not None:
+            tasks = [
+                (row, harmonic_threshold_units, margin_threshold_percent, current_threshold_a) for row in rows
+            ]
+            results = list(self._executor.map(_evaluate_row_worker, tasks))
+        else:
+            results = [
+                _evaluate_row(
+                    row,
+                    self.topology,
+                    self.cable_map,
+                    self.feasibility,
+                    self.targets,
+                    self.n_ieq_constr,
+                    harmonic_threshold_units,
+                    margin_threshold_percent,
+                    current_threshold_a,
                 )
-                if not feasibility.is_feasible:
-                    objectives[row_index] = (_PENALTY, _PENALTY)
-                    constraints[row_index, 0] = sum(violation.severity for violation in feasibility.violations)
-                    continue
+                for row in rows
+            ]
 
-                target_constraint_index = 1
-                turn_budget_violation = False
-                if self.targets.max_total_turns is not None:
-                    total_turns = sum(block.n_turns for layer in unit_design.layers for block in layer.blocks)
-                    constraints[row_index, target_constraint_index] = max(
-                        0.0,
-                        float(total_turns - self.targets.max_total_turns),
-                    )
-                    turn_budget_violation |= constraints[row_index, target_constraint_index] > 0.0
-                    target_constraint_index += 1
-                if self.targets.max_turns_per_layer is not None:
-                    per_layer_violation = sum(
-                        max(0, sum(block.n_turns for block in layer.blocks) - self.targets.max_turns_per_layer)
-                        for layer in unit_design.layers
-                    )
-                    constraints[row_index, target_constraint_index] = float(per_layer_violation)
-                    turn_budget_violation |= constraints[row_index, target_constraint_index] > 0.0
-                    target_constraint_index += 1
-                if turn_budget_violation:
-                    objectives[row_index] = (_PENALTY, _PENALTY)
-                    continue
-
-                solved = operating_point(unit_design, self.targets.target_bore_field_t)
-                field_quality = field_quality_objective(
-                    solved.design,
-                    self.targets.r_ref_mm,
-                    self.targets.max_order,
-                )
-                margin_percent = load_line_margin_objective(
-                    solved.design,
-                    tuple(layer.cable_id for layer in self.topology.layers),
-                    self.targets.cadata_by_layer,
-                    self.targets.temperature_k,
-                )
-                objectives[row_index] = (field_quality, -margin_percent)
-                if harmonic_threshold_units is not None:
-                    # field_quality_objective's raw return value is already
-                    # in CERN/European relative "units" (parts per 1e4 of
-                    # the main dipole term) -- see multipole_coefficients'
-                    # own docstring ("multiplied by 1e4... b_1 is 10000 for
-                    # a normal dipole"). Dividing harmonic_threshold_units
-                    # by 1e4 here compared an already-units-scaled target
-                    # against an already-units-scaled objective after an
-                    # extra, erroneous 1e4 shrink -- confirmed against the
-                    # real CTH-14T design (tests/physics/
-                    # test_roxie_parity_live.py's _cth14t_design()), whose
-                    # own field_quality_objective is ~2.0 (sensible against
-                    # a 5.0-unit target) but would fail the old
-                    # 0.0005-unit threshold by a factor of ~4000. No
-                    # conversion needed: compare directly.
-                    constraints[row_index, target_constraint_index] = max(
-                        0.0, field_quality - harmonic_threshold_units
-                    )
-                    target_constraint_index += 1
-                if margin_threshold_percent is not None:
-                    constraints[row_index, target_constraint_index] = max(
-                        0.0,
-                        margin_threshold_percent - margin_percent,
-                    )
-                    target_constraint_index += 1
-                if current_threshold_a is not None:
-                    constraints[row_index, target_constraint_index] = max(
-                        0.0,
-                        abs(solved.operating_current_a) - current_threshold_a,
-                    )
-            except (KeyError, ValueError, ZeroDivisionError):
-                objectives[row_index] = (_PENALTY, _PENALTY)
-                constraints[row_index, 0] = 1.0
+        for row_index, (objective_row, constraint_row, family) in enumerate(results):
+            objectives[row_index] = objective_row
+            constraints[row_index] = constraint_row
+            families[row_index] = family
 
         out["F"] = objectives
         out["G"] = constraints
         out["topology_family"] = families
+
+
+def _evaluate_row(
+    row: np.ndarray,
+    topology: Topology,
+    cable_map: Mapping[str, CableSpec],
+    feasibility: FeasibilitySettings,
+    targets: OptimizationTargets,
+    n_ieq_constr: int,
+    harmonic_threshold_units: float | None,
+    margin_threshold_percent: float | None,
+    current_threshold_a: float | None,
+) -> tuple[tuple[float, float], np.ndarray, str]:
+    """Evaluate one genome row. Module-level (not a method) so it is picklable
+    and can run in a worker process (task 0050)."""
+
+    objective = (_PENALTY, _PENALTY)
+    constraint = np.zeros(n_ieq_constr, dtype=float)
+    family = "invalid"
+    try:
+        unit_design = decode(row, topology, cable_map)
+        family = topology_family(unit_design)
+        result = check_feasibility(
+            unit_design,
+            aperture_radius_mm=topology.aperture_radius_mm,
+            min_gap_mm=feasibility.min_gap_mm,
+            max_angle_deg=feasibility.max_angle_deg,
+            min_layer_clearance_mm=feasibility.min_layer_clearance_mm,
+            min_pole_gap_mm=feasibility.min_pole_gap_mm,
+            min_inter_block_gap_mm=feasibility.min_inter_block_gap_mm,
+            enforce_layer_nesting=feasibility.enforce_layer_nesting,
+        )
+        if not result.is_feasible:
+            constraint[0] = sum(violation.severity for violation in result.violations)
+            return objective, constraint, family
+
+        target_constraint_index = 1
+        turn_budget_violation = False
+        if targets.max_total_turns is not None:
+            total_turns = sum(block.n_turns for layer in unit_design.layers for block in layer.blocks)
+            constraint[target_constraint_index] = max(0.0, float(total_turns - targets.max_total_turns))
+            turn_budget_violation |= constraint[target_constraint_index] > 0.0
+            target_constraint_index += 1
+        if targets.max_turns_per_layer is not None:
+            per_layer_violation = sum(
+                max(0, sum(block.n_turns for block in layer.blocks) - targets.max_turns_per_layer)
+                for layer in unit_design.layers
+            )
+            constraint[target_constraint_index] = float(per_layer_violation)
+            turn_budget_violation |= constraint[target_constraint_index] > 0.0
+            target_constraint_index += 1
+        if turn_budget_violation:
+            return objective, constraint, family
+
+        solved = operating_point(unit_design, targets.target_bore_field_t)
+        field_quality = field_quality_objective(solved.design, targets.r_ref_mm, targets.max_order)
+        margin_percent = load_line_margin_objective(
+            solved.design,
+            tuple(layer.cable_id for layer in topology.layers),
+            targets.cadata_by_layer,
+            targets.temperature_k,
+        )
+        objective = (field_quality, -margin_percent)
+        if harmonic_threshold_units is not None:
+            # field_quality_objective's raw return value is already in
+            # CERN/European relative "units" (parts per 1e4 of the main
+            # dipole term) -- see multipole_coefficients' own docstring
+            # ("multiplied by 1e4... b_1 is 10000 for a normal dipole").
+            # No conversion needed: compare directly (task 0041).
+            constraint[target_constraint_index] = max(0.0, field_quality - harmonic_threshold_units)
+            target_constraint_index += 1
+        if margin_threshold_percent is not None:
+            constraint[target_constraint_index] = max(0.0, margin_threshold_percent - margin_percent)
+            target_constraint_index += 1
+        if current_threshold_a is not None:
+            constraint[target_constraint_index] = max(0.0, abs(solved.operating_current_a) - current_threshold_a)
+        return objective, constraint, family
+    except (KeyError, ValueError, ZeroDivisionError):
+        constraint[:] = 0.0
+        constraint[0] = 1.0
+        return (_PENALTY, _PENALTY), constraint, family
+
+
+# Process-pool worker state (task 0050): set once per worker process via
+# _init_worker, then reused across every row that process evaluates. Kept
+# as module globals rather than passed per-call so the (relatively large,
+# static-for-the-whole-run) topology/cable_map/feasibility/targets objects
+# are pickled only once at pool startup, not once per row.
+_worker_topology: Topology
+_worker_cable_map: Mapping[str, CableSpec]
+_worker_feasibility: FeasibilitySettings
+_worker_targets: OptimizationTargets
+_worker_n_ieq_constr: int
+
+
+def _init_worker(
+    topology: Topology,
+    cable_map: Mapping[str, CableSpec],
+    feasibility: FeasibilitySettings,
+    targets: OptimizationTargets,
+    n_ieq_constr: int,
+    peak_field_filaments_per_axis: int,
+) -> None:
+    global _worker_topology, _worker_cable_map, _worker_feasibility, _worker_targets, _worker_n_ieq_constr
+    _worker_topology = topology
+    _worker_cable_map = cable_map
+    _worker_feasibility = feasibility
+    _worker_targets = targets
+    _worker_n_ieq_constr = n_ieq_constr
+    # Windows uses "spawn" for new processes, so each worker re-imports
+    # dot.optimize.objectives fresh -- it does NOT inherit the parent
+    # process's runtime mutation of this module-level global (campaign
+    # scripts set it to a cheaper SEARCH_DISCRETIZATION value). Without
+    # this, workers would silently fall back to the expensive default,
+    # defeating the whole point of the multi-fidelity search/verify split.
+    _objectives_module.PEAK_FIELD_FILAMENTS_PER_AXIS = peak_field_filaments_per_axis
+
+
+def _evaluate_row_worker(
+    task: tuple[np.ndarray, float | None, float | None, float | None],
+) -> tuple[tuple[float, float], np.ndarray, str]:
+    row, harmonic_threshold_units, margin_threshold_percent, current_threshold_a = task
+    return _evaluate_row(
+        row,
+        _worker_topology,
+        _worker_cable_map,
+        _worker_feasibility,
+        _worker_targets,
+        _worker_n_ieq_constr,
+        harmonic_threshold_units,
+        margin_threshold_percent,
+        current_threshold_a,
+    )
