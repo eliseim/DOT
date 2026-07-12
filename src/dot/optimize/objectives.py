@@ -41,6 +41,27 @@ class _IndexedTurn:
     turn: TurnPolygon
 
 
+@dataclass(frozen=True, slots=True)
+class LayerMarginRecord:
+    """Load-line margin detail for one layer (task 0051).
+
+    ``load_line_margin_objective`` computes exactly these values internally
+    already, but only ever returns ``min(margin_percent for all layers)`` --
+    discarding which layer that minimum came from and why (a layer can be
+    the limiting one either because its peak field is high, e.g. the
+    innermost layer closest to the bore, or because its conductor's
+    critical-current curve is comparatively unfavorable at that field, e.g.
+    a lower-field-class conductor in an outer layer). This record surfaces
+    that detail directly instead of requiring it to be re-derived.
+    """
+
+    layer_index: int
+    peak_field_t: float
+    operating_current_a: float
+    short_sample_current_a: float
+    margin_percent: float
+
+
 def field_quality_objective(design: DipoleDesign, r_ref_mm: float, max_order: int) -> float:
     """Return max relative harmonic magnitude over orders 2..``max_order``."""
 
@@ -65,10 +86,31 @@ def load_line_margin_objective(
     """
 
     del cable_specs_by_layer
+    records = load_line_margin_detail(design, cadata_by_layer, temperature_k)
+    return min(record.margin_percent for record in records)
+
+
+def load_line_margin_detail(
+    design: DipoleDesign,
+    cadata_by_layer: tuple[LayerConductorData | None, ...],
+    temperature_k: float,
+) -> tuple[LayerMarginRecord, ...]:
+    """Return the full per-layer load-line margin breakdown (task 0051).
+
+    ``load_line_margin_objective`` reduces this to a single
+    ``min(margin_percent)`` for use as a pymoo objective; this function is
+    the underlying detail, for reporting which layer is actually limiting
+    the design and why -- a low margin can come from either a high peak
+    field (e.g. the innermost, highest-field layer) or an unfavorable
+    conductor critical-current curve at that field (e.g. a lower-field-class
+    conductor in an outer layer), and only the per-layer breakdown
+    distinguishes the two.
+    """
+
     evaluated_layers = tuple(index for index, layer_data in enumerate(cadata_by_layer) if layer_data is not None)
     if not evaluated_layers:
         raise ValueError("load-line margin requires conductor data for at least one layer")
-    margins: list[float] = []
+    records: list[LayerMarginRecord] = []
     indexed_turns = _conductor_turns_by_layer(design)
     sources = _near_field_source_array(indexed_turns)
     for layer_index in evaluated_layers:
@@ -92,8 +134,17 @@ def load_line_margin_objective(
             k_field_per_current,
             i_hi=_load_line_upper_bracket(layer_data.remfit, temperature_k, k_field_per_current),
         )
-        margins.append(load_line_margin_percent(operating_current_a, short_sample_current_a))
-    return min(margins)
+        margin_percent = load_line_margin_percent(operating_current_a, short_sample_current_a)
+        records.append(
+            LayerMarginRecord(
+                layer_index=layer_index,
+                peak_field_t=peak_field_t,
+                operating_current_a=operating_current_a,
+                short_sample_current_a=short_sample_current_a,
+                margin_percent=margin_percent,
+            )
+        )
+    return tuple(records)
 
 
 def _design_sources(design: DipoleDesign):

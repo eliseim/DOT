@@ -12,6 +12,7 @@ from dot.optimize.objectives import (
     PEAK_FIELD_FILAMENTS_PER_AXIS,
     _conductor_turns_by_layer,
     _peak_field_on_own_turns,
+    load_line_margin_detail,
 )
 from dot.physics import field_at, multipole_coefficients, place_line_current_sources
 
@@ -72,6 +73,39 @@ def test_load_line_margin_skips_unsupported_layers_before_peak_search() -> None:
     assert overall_turn.layer_index == 0
     assert evaluated_turn.layer_index == 1
     assert margin > 0.0
+
+
+def test_load_line_margin_detail_identifies_conductor_limited_outer_layer() -> None:
+    # Directly answers the "is the minimum margin in the high-field inner
+    # layer, or in an outer layer with a weaker conductor?" question (task
+    # 0051): layer 0 is closer to the bore (higher peak field), layer 1 is
+    # farther out (lower peak field) but deliberately given a much weaker
+    # conductor -- the limiting layer must be layer 1, despite its lower
+    # field, proving the detail correctly attributes the bottleneck to
+    # conductor choice rather than field level.
+    design = _two_layer_design(current_a=250.0)
+    strong_conductor = conductor_data()
+    weak_conductor = _weak_conductor_data()
+
+    records = load_line_margin_detail(
+        design,
+        cadata_by_layer=(strong_conductor, weak_conductor),
+        temperature_k=0.0,
+    )
+
+    by_layer = {record.layer_index: record for record in records}
+    assert by_layer[0].peak_field_t > by_layer[1].peak_field_t, "layer 0 (inner) must see the higher field"
+    assert by_layer[1].margin_percent < by_layer[0].margin_percent, (
+        "layer 1 must be the limiting layer despite its lower field, due to its weaker conductor"
+    )
+
+    overall_margin = load_line_margin_objective(
+        design,
+        cable_specs_by_layer=(),
+        cadata_by_layer=(strong_conductor, weak_conductor),
+        temperature_k=0.0,
+    )
+    assert overall_margin == pytest.approx(by_layer[1].margin_percent)
 
 
 def test_load_line_margin_requires_at_least_one_supported_layer() -> None:
@@ -213,6 +247,28 @@ def conductor_data() -> LayerConductorData:
     cable = CableRecord(n_strands=1, degradation_percent=0.0)
     area_m2 = math.pi * 1.0**2 / 4.0 * 1.0e-6
     zero_field_cable_current_a = 5000.0
+    remfit = Type1FitCoefficients(
+        c1=10.0 * zero_field_cable_current_a / area_m2,
+        c2=10.0,
+        c3=1.0,
+        c4=1.0,
+        c5=1.0,
+        c6=1.0,
+        c7=20.1,
+    )
+    return LayerConductorData(strand=strand, cable=cable, remfit=remfit)
+
+
+def _weak_conductor_data() -> LayerConductorData:
+    # Same strand/cable geometry as conductor_data(), but a much lower
+    # zero-field critical current -- a stand-in for a lower-field-class
+    # conductor (e.g. NbTi vs Nb3Sn) with an unfavorable critical-current
+    # curve, used to prove an outer, lower-field layer can still be the
+    # margin-limiting one.
+    strand = StrandRecord(diameter_mm=1.0, cu_to_sc_ratio=0.0)
+    cable = CableRecord(n_strands=1, degradation_percent=0.0)
+    area_m2 = math.pi * 1.0**2 / 4.0 * 1.0e-6
+    zero_field_cable_current_a = 300.0
     remfit = Type1FitCoefficients(
         c1=10.0 * zero_field_cable_current_a / area_m2,
         c2=10.0,
