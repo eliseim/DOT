@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "geometry_angle_convention": "roxie",
+  "geometry_angle_convention": "native-midplane-zero",
   "name": "lhc-mb-blind-no-iron",
   "magnet": {
     "target_bore_field_t": 7.0,

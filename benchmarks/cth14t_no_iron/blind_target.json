@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "geometry_angle_convention": "roxie",
+  "geometry_angle_convention": "native-midplane-zero",
   "name": "cth-14t-blind-no-iron",
   "magnet": {
     "target_bore_field_t": 12.4,
@@ -89,6 +89,6 @@
   "provenance": {
     "layout_knowledge_used": false,
     "note": "DOT derives the first-block anchors from aperture, cable dimensions and requested gaps. The input contains no published CTH wedge-block positions or turn allocation.",
-    "cable_reference": "HFM_KE6538___D1_1__CTH_14T electromagnetic design report and its linked ROXIE cadata"
+    "cable_reference": "HFM_KE6538___D1_1__CTH_14T electromagnetic design report and its linked cable data"
   }
 }

@@ -1,11 +1,11 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "campaign": "lhc-mb-blind-no-iron",
   "certified": true,
   "harmonic_convention": "CERN/European units: 1e-4 of main normal dipole",
   "geometry_conventions": {
-    "phi": "ROXIE/CTH: 0 deg at midplane, increasing toward pole",
-    "alpha": "ROXIE absolute cable-frame angle; no conversion required"
+    "phi": "0 deg at midplane, increasing toward pole",
+    "alpha": "absolute cable-frame angle"
   },
   "reference_radius_mm": 17.0,
   "bore_field_t": 7.0,
@@ -90,9 +90,9 @@
   ],
   "blocks": [
     {
-      "layer": 1,
       "block": 1,
-      "roxie_block": 1,
+      "layer": 1,
+      "block_in_layer": 1,
       "conductor": "YELLONIN",
       "radius_mm": 28.15,
       "n_turns": 13,
@@ -101,9 +101,9 @@
       "current_a": 10825.442397475106
     },
     {
-      "layer": 1,
       "block": 2,
-      "roxie_block": 2,
+      "layer": 1,
+      "block_in_layer": 2,
       "conductor": "YELLONIN",
       "radius_mm": 28.15,
       "n_turns": 1,
@@ -112,9 +112,9 @@
       "current_a": 10825.442397475106
     },
     {
-      "layer": 1,
       "block": 3,
-      "roxie_block": 3,
+      "layer": 1,
+      "block_in_layer": 3,
       "conductor": "YELLONIN",
       "radius_mm": 28.15,
       "n_turns": 3,
@@ -123,9 +123,9 @@
       "current_a": 10825.442397475106
     },
     {
+      "block": 4,
       "layer": 2,
-      "block": 1,
-      "roxie_block": 4,
+      "block_in_layer": 1,
       "conductor": "YELLONOU",
       "radius_mm": 44.04,
       "n_turns": 13,
@@ -134,9 +134,9 @@
       "current_a": 10825.442397475106
     },
     {
+      "block": 5,
       "layer": 2,
-      "block": 2,
-      "roxie_block": 5,
+      "block_in_layer": 2,
       "conductor": "YELLONOU",
       "radius_mm": 44.04,
       "n_turns": 13,

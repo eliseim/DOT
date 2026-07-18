@@ -66,7 +66,9 @@ def test_save_generation_snapshot_writes_png_and_characteristics_json(tmp_path: 
     assert png_path.exists()
     assert png_path.stat().st_size > 0
 
-    characteristics = json.loads(json_path.read_text())
+    snapshot_text = json_path.read_text()
+    assert "roxie" not in snapshot_text.lower()
+    characteristics = json.loads(snapshot_text)
     assert characteristics["generation"] == 3
     assert characteristics["total_generations"] == 10
     assert characteristics["harmonic_units"] == 4.2
@@ -102,13 +104,13 @@ def test_save_generation_snapshot_writes_png_and_characteristics_json(tmp_path: 
         "normal_residual_units": 1.2,
         "skew_units": 0.0,
     }
-    assert characteristics["per_block_margin"][0]["roxie_block"] == 1
+    assert characteristics["per_block_margin"][0]["block"] == 1
     assert characteristics["per_block_margin"][0]["conductor"] == "HF"
     assert characteristics["blocks"] == [
         {
-            "layer": 1,
             "block": 1,
-            "roxie_block": 1,
+            "layer": 1,
+            "block_in_layer": 1,
             "conductor": "HF",
             "radius_mm": 10.0,
             "n_turns": 2,

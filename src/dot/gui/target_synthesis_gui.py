@@ -40,7 +40,7 @@ from .tooltip import attach_tooltip
 
 # task 0057: plain-language help text for every parameter a user can type
 # into this GUI, shown as a hover tooltip on its label. Grounded in DOT's
-# own ROXIE convention (phi_deg=0 at the midplane / phi_deg=90 at the pole)
+# native angle convention (phi_deg=0 at the midplane / phi_deg=90 at the pole)
 # so the tooltip text
 # doesn't just restate the field name.
 PARAMETER_HELP: dict[str, str] = {
@@ -51,7 +51,7 @@ PARAMETER_HELP: dict[str, str] = {
     "output_dir": (
         "Root folder where DOT creates one timestamped directory per campaign. It contains "
         "generation cross-section snapshots, final Pareto JSON, the best-candidate PNG, and a "
-        "ROXIE-ready per-block CSV table."
+        "per-block geometry CSV table."
     ),
     "target_field_t": (
         "The magnetic flux density at the center of the aperture (bore) the coil must "
@@ -83,7 +83,7 @@ PARAMETER_HELP: dict[str, str] = {
         "calculation. Typically 1.9K (superfluid helium) for Nb3Sn/NbTi accelerator magnets."
     ),
     "layer_cadata_path": (
-        "Path to a ROXIE .cadata file with this layer's conductor's strand/cable/critical-"
+        "Path to a .cadata file with this layer's conductor's strand/cable/critical-"
         "current-fit parameters. Required to compute load-line margin for this layer."
     ),
     "layer_conductor_name": (
@@ -107,11 +107,11 @@ PARAMETER_HELP: dict[str, str] = {
         "successive layer radii to establish the desired radial spacing."
     ),
     "layer_phi_min_deg": (
-        "Lower ROXIE phi bound (degrees): phi=0deg is the midplane and phi=90deg is "
+        "Lower phi bound (degrees): phi=0deg is the midplane and phi=90deg is "
         "the pole. Smaller phi is closer to the midplane."
     ),
     "layer_phi_max_deg": (
-        "Upper ROXIE phi bound (degrees): phi=0deg is the midplane and phi=90deg is "
+        "Upper phi bound (degrees): phi=0deg is the midplane and phi=90deg is "
         "the pole. Larger phi is closer to the pole."
     ),
     "layer_alpha_min_deg": (
@@ -121,11 +121,11 @@ PARAMETER_HELP: dict[str, str] = {
         "Internal upper search bound for the cable tilt of blocks after the user-fixed first block."
     ),
     "layer_first_block_phi_deg": (
-        "Fixed ROXIE phi of this layer's first (midplane) block: 0deg is the midplane and "
+        "Fixed phi of this layer's first (midplane) block: 0deg is the midplane and "
         "90deg is the pole. DOT keeps this value fixed and optimizes only its turns."
     ),
     "layer_first_block_alpha_deg": (
-        "Fixed ROXIE alpha of this layer's first (midplane) block. DOT keeps this cable-frame "
+        "Fixed alpha of this layer's first (midplane) block. DOT keeps this cable-frame "
         "orientation fixed and optimizes only the block's number of turns."
     ),
     "layer_radial_gap_mm": (
@@ -133,7 +133,7 @@ PARAMETER_HELP: dict[str, str] = {
         "insulated turn. Layer 1 is fixed directly on the aperture and ignores this value."
     ),
     "layer_azimuthal_gap_mm": (
-        "One-sided midplane gap in mm. DOT derives the first-block ROXIE angle as "
+        "One-sided midplane gap in mm. DOT derives the first-block angle as "
         "atan(azimuthal gap / R); its alpha is fixed to zero."
     ),
     "layer_min_inter_block_gap_mm": (
@@ -241,7 +241,7 @@ NSGA2_PRESETS: dict[str, tuple[int, int] | None] = {
 DEFAULT_NSGA2_PRESET = "Design search (recommended)"
 
 DEFAULT_STATE: dict[str, Any] = {
-    "geometry_angle_convention": "roxie",
+    "geometry_angle_convention": "native-midplane-zero",
     "campaign_name": DEFAULT_CAMPAIGN_NAME,
     "output_dir": DEFAULT_OUTPUT_DIR,
     "target_bore_field_t": 0.02,
@@ -293,11 +293,11 @@ DEFAULT_STATE: dict[str, Any] = {
 
 
 class App(tk.Tk):
-    """DOT target synthesis GUI."""
+    """Graphical interface for the Dipole Optimization Tool."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("DOT Target Synthesis")
+        self.title("DOT - Dipole Optimization Tool")
         self.geometry("1560x860")
         self.minsize(980, 700)
 
@@ -371,7 +371,16 @@ class App(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(outer)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(toolbar, text="Load Configuration", command=self._load_config).grid(
+            row=0, column=0, padx=(0, 4)
+        )
+        ttk.Button(toolbar, text="Save Configuration", command=self._save_config).grid(
+            row=0, column=1
+        )
 
         controls_background = ttk.Style(self).lookup("TFrame", "background") or self.cget(
             "background"
@@ -390,7 +399,7 @@ class App(tk.Tk):
             handlepad=24,
             opaqueresize=True,
         )
-        main_paned_window.grid(row=0, column=0, sticky="nsew")
+        main_paned_window.grid(row=1, column=0, sticky="nsew")
         self.main_paned_window = main_paned_window
 
         controls_panel = ttk.Frame(main_paned_window, padding=(0, 0, 6, 0))
@@ -701,13 +710,7 @@ class App(tk.Tk):
             buttons, text="Stop", command=self._request_stop, state="disabled"
         )
         self.stop_button.grid(row=0, column=1, padx=(0, 4))
-        ttk.Button(buttons, text="Save Config", command=self._save_config).grid(
-            row=0, column=2, padx=(0, 4)
-        )
-        ttk.Button(buttons, text="Load Config", command=self._load_config).grid(
-            row=0, column=3, padx=(0, 4)
-        )
-        ttk.Button(buttons, text="How to use?", command=self._show_help).grid(row=0, column=4)
+        ttk.Button(buttons, text="How to use?", command=self._show_help).grid(row=0, column=2)
         self.progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=1, value=0)
         self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 2))
         ttk.Label(frame, textvariable=self.progress_var).grid(
@@ -759,7 +762,7 @@ class App(tk.Tk):
 
         geometry_tab = ttk.Frame(notebook, padding=4)
         electromagnetic_tab = ttk.Frame(notebook, padding=4)
-        notebook.add(geometry_tab, text="Block Geometry / ROXIE")
+        notebook.add(geometry_tab, text="Block Geometry")
         notebook.add(electromagnetic_tab, text="Electromagnetic Results")
         geometry_tab.columnconfigure(0, weight=1)
         electromagnetic_tab.columnconfigure(0, weight=1)
@@ -785,8 +788,8 @@ class App(tk.Tk):
             "conductor": "Conductor",
             "radius": "R [mm]",
             "turns": "Turns",
-            "phi": "phi ROXIE [deg]",
-            "alpha": "alpha ROXIE [deg]",
+            "phi": "phi [deg]",
+            "alpha": "alpha [deg]",
         }
         for column in block_columns:
             block_tree.heading(column, text=headings[column])
@@ -991,7 +994,7 @@ class App(tk.Tk):
     def _browse_cadata(self, index: int) -> None:
         path = filedialog.askopenfilename(
             title="Select .cadata file",
-            filetypes=(("ROXIE cadata", "*.cadata"), ("All files", "*.*")),
+            filetypes=(("Cable data", "*.cadata"), ("All files", "*.*")),
         )
         if path:
             self.layer_vars[index]["cadata_path"].set(path)
@@ -1086,7 +1089,7 @@ class App(tk.Tk):
         """
 
         messagebox.showinfo(
-            "How to use DOT Target Synthesis",
+            "How to use DOT - Dipole Optimization Tool",
             "DOT searches for a superconducting dipole coil cross-section that hits your "
             "target field, field-quality, and load-line-margin targets.\n\n"
             "1. Magnet Physics: set the target bore field, aperture radius, layer count, "
@@ -1108,7 +1111,8 @@ class App(tk.Tk):
             "finishes, the Results panel shows the best candidate found (or the closest "
             "trade-off if nothing fully met your targets).\n\n"
             "Hover any parameter's label (wait briefly) to see what it means and how to "
-            "set it. 'Save Config' / 'Load Config' let you keep or reuse a setup.",
+            "set it. The upper 'Save Configuration' / 'Load Configuration' buttons let "
+            "you keep or reuse a setup.",
         )
 
     def _poll_runner(self) -> None:
@@ -1281,7 +1285,7 @@ class App(tk.Tk):
             self.result_location_var.set(f"Results folder: {output_dir}")
             self._append_log(f"Saved final cross-section: {artifacts.cross_section_png}")
             self._append_log(f"Saved best-design summary sheet: {artifacts.summary_png}")
-            self._append_log(f"Saved ROXIE block table: {artifacts.block_table_csv}")
+            self._append_log(f"Saved block geometry table: {artifacts.block_table_csv}")
             self._append_log(f"Saved Pareto archive: {artifacts.pareto_json}")
             self._append_log(f"Saved final Pareto frontier: {artifacts.pareto_frontier_png}")
             self._append_log(
@@ -1304,7 +1308,7 @@ class App(tk.Tk):
                 "end",
                 values=(
                     row.layer,
-                    row.block,
+                    row.roxie_block,
                     row.conductor,
                     f"{row.radius_mm:.6g}",
                     row.n_turns,
@@ -1352,7 +1356,7 @@ class App(tk.Tk):
         rows.extend(
             (
                 "Live load line",
-                f"ROXIE block {record.roxie_block}: Bpeak / Iss / margin",
+                f"Block {record.roxie_block}: Bpeak / Iss / margin",
                 f"{record.peak_field_t:.6g} T / {record.short_sample_current_a:.6g} A / "
                 f"{record.margin_percent:.6g}%",
             )
@@ -1416,7 +1420,7 @@ class App(tk.Tk):
         rows.extend(
             (
                 "Block load line",
-                f"ROXIE block {record.roxie_block}: Bpeak / Iss / margin",
+                f"Block {record.roxie_block}: Bpeak / Iss / margin",
                 f"{record.peak_field_t:.6g} T / {record.short_sample_current_a:.6g} A / "
                 f"{record.margin_percent:.6g}%",
             )
@@ -1694,7 +1698,7 @@ class App(tk.Tk):
         harmonic_target_vars = self.__dict__.get("harmonic_target_vars", {})
         max_harmonic_order = int(self.max_harmonic_order_var.get())
         return {
-            "geometry_angle_convention": "roxie",
+            "geometry_angle_convention": "native-midplane-zero",
             "campaign_name": self.campaign_name_var.get(),
             "output_dir": self.output_dir_var.get(),
             "target_bore_field_t": float(self.target_field_var.get()),
@@ -2008,15 +2012,15 @@ def _layerwise_feasibility_value(value: Any, layer_index: int) -> float:
 
 
 def _migrate_angle_convention(state: dict[str, Any]) -> dict[str, Any]:
-    """Convert pre-v2 GUI states from pole-zero DOT angles to ROXIE angles."""
+    """Convert pre-v2 GUI states into DOT's midplane-zero native angles."""
 
     convention = state.get("geometry_angle_convention")
-    if convention == "roxie":
-        return state
+    if convention in {"native-midplane-zero", "roxie"}:
+        return {**state, "geometry_angle_convention": "native-midplane-zero"}
     if convention not in {None, "dot-pole-zero"}:
         raise ValueError(f"unsupported geometry_angle_convention: {convention!r}")
 
-    migrated = {**state, "geometry_angle_convention": "roxie"}
+    migrated = {**state, "geometry_angle_convention": "native-midplane-zero"}
     migrated_layers: list[dict[str, Any]] = []
     for layer in state.get("layers", []):
         converted = dict(layer)

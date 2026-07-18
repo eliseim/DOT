@@ -2,12 +2,12 @@
 
 DOT autonomously synthesizes and certifies two-dimensional, coil-only superconducting dipole
 cross-sections. It combines exact no-iron current scaling, cable-level Biot–Savart fields,
-ROXIE `.cadata` conductor resolution, critical-surface/load-line calculations, manufacturability
+`.cadata` conductor resolution, critical-surface/load-line calculations, manufacturability
 constraints, and NSGA-II Pareto search.
 
-DOT is a pre-design engine, not a general replacement for every ROXIE capability. Version 0.1
-does not model iron/saturation, coil ends, persistent-current magnetization, stress, quench
-protection, or three-dimensional fields.
+DOT is a pre-design engine for 2D coil-only/no-iron dipoles. Version 0.1 does not model
+iron/saturation, coil ends, persistent-current magnetization, stress, quench protection, or
+three-dimensional fields.
 
 ## Validated result
 
@@ -77,7 +77,7 @@ Launch `dot-gui` for the designer workflow. During every campaign it shows:
 - a determinate generation progress bar, elapsed time, and moving-window ETA;
 - the best target-balanced candidate in the current population;
 - the real mirrored cable-turn cross-section and its evolving block table;
-- every requested harmonic, every ROXIE-numbered block margin, operating current, and
+- every requested harmonic, every continuously numbered block margin, operating current, and
   total-turn-count convergence.
 
 The vertical handle between campaign parameters and results is a draggable horizontal splitter.
@@ -97,8 +97,8 @@ DOT fixes Layer 1 at the aperture radius, derives `phi=atan(azimuthal_gap/R)`, a
 Each later R is the outer x-coordinate of the preceding layer's first insulated turn plus the
 requested radial gap. DOT chooses the first block's turn count and autonomously creates up to the
 specified maximum number of later blocks by selecting their existence, turns, phi, and alpha.
-Angles use the ROXIE/CTH convention directly: `phi=0` at the midplane and increases toward
-`phi=90` at the pole; `alpha` is the absolute ROXIE cable-frame angle.
+Angles use DOT's native convention: `phi=0` at the midplane and increases toward `phi=90` at the
+pole; `alpha` is the absolute cable-frame angle.
 
 Each row in **Per-Layer Topology** has a **Min block clearance [mm]** field. This is an
 engineering clearance, measured as the exact shortest Euclidean distance between the insulated
@@ -107,7 +107,7 @@ and outer layers. The separate **Numerical tolerance [mm]** field is only the ge
 small round-off/contact tolerance; it does not reserve physical space.
 
 Headless campaign JSON uses the same gap-derived anchor contract and declares
-`"geometry_angle_convention": "roxie"` at the top level. For example:
+`"geometry_angle_convention": "native-midplane-zero"` at the top level. For example:
 
 ```json
 "layers": [
@@ -181,29 +181,29 @@ Each GUI run creates `<output>/<campaign>-YYYYMMDD-HHMMSS/`. The folder contains
 |---|---|
 | `campaign.json` | Exact GUI inputs used for the run |
 | `generations/gen_NNNN.png` | Best cross-section visible at that generation |
-| `generations/gen_NNNN.json` | Its metrics and ROXIE-ready block table |
+| `generations/gen_NNNN.json` | Its metrics and per-block geometry table |
 | `best_candidate_cross_section.png` | Final certified representative geometry |
-| `best_candidate_summary.png` | Cross-section, electromagnetic table, and ROXIE geometry table in one printable image |
+| `best_candidate_summary.png` | Cross-section, electromagnetic table, and block geometry table in one printable image |
 | `best_candidate.json` | Final harmonics, margins, current, field, and blocks |
-| `best_candidate_roxie_blocks.csv` | Per-block `R`, turns, native ROXIE `phi`, and native ROXIE `alpha` |
+| `best_candidate_geometry.csv` | Per-block `R`, turns, `phi`, and `alpha` |
 | `pareto_candidates.json` | Certified candidates, near-feasible diagnostics, and the complete final search-fidelity Pareto front |
 | `final_pareto_frontier.png` | Worst harmonic versus minimum margin, colored by total turns, with acceptance lines |
 | `best_topology_designs/` | One flat folder containing the best design from each of up to 10 distinct topologies |
-| `best_topology_designs/design_NN_*_summary.png` | One-sheet cross-section, electromagnetic results, and ROXIE block geometry |
+| `best_topology_designs/design_NN_*_summary.png` | One-sheet cross-section, electromagnetic results, and block geometry |
 | `best_topology_designs/design_NN_*.json` | Complete machine-readable design record |
-| `best_topology_designs/design_NN_*_roxie_blocks.csv` | ROXIE-ready block table |
+| `best_topology_designs/design_NN_*_geometry.csv` | Per-block geometry table |
 | `best_topology_designs/manifest.json` | Ranking, topology, performance, and filenames for the folder |
 
 The generation and final candidate JSON files contain every requested odd harmonic's physical
 value, signed target, and residual,
-`margins_by_block`/`per_block_margin` with continuous ROXIE block numbering,
+`margins_by_block`/`per_block_margin` with continuous block numbering,
 `inter_block_clearances`, and `first_layer_pole_turn_clearance_mm`. The GUI shows the same
 diagnostics while the campaign is running and for the selected final candidate.
 
 DOT also exports up to 10 alternatives into one flat `best_topology_designs` folder. Exactly one
 best target-balanced member is retained from each blocks-per-layer topology family, so duplicate
 topologies do not occupy designer-facing slots. Each topology gets a composite summary PNG, JSON,
-and ROXIE CSV with the same basename. If no candidate passes certification, the same output is
+and geometry CSV with the same basename. If no candidate passes certification, the same output is
 generated from the search frontier and explicitly labelled `uncertified_search_front`.
 
 The live convergence dashboard has three aligned generation plots: minimum load-line margin,
@@ -226,9 +226,9 @@ generation snapshots below `seed_<seed>/generations/`.
 - Cable geometry and critical-current fits are resolved through the selected cadata `CONDUCTOR`
   chain; records are never mixed by “first row” selection.
 - Search and certification fidelities are versioned separately.
-- DOT uses the CTH-14T report/ROXIE convention directly: `phi=0` at the midplane, increasing toward
-  `phi=90` at the pole. `alpha` is the absolute ROXIE cable-frame angle. No export conversion is
-  required; the reported `R`, turns, `phi`, and `alpha` can be entered directly in ROXIE.
+- DOT uses a midplane-zero convention: `phi=0` at the midplane, increasing toward `phi=90` at the
+  pole. `alpha` is the absolute cable-frame angle. The reported `R`, turns, `phi`, and `alpha`
+  reproduce the optimized block layout without an angle conversion.
 
 See the [implementation report](docs/DOT_IMPLEMENTATION_REPORT.md) and the detailed
 [technical review](docs/DOT_TECHNICAL_REVIEW_AND_IMPLEMENTATION_GUIDE.md). Reproducible acceleration
@@ -239,7 +239,7 @@ field, peak-field, and load-line comparisons are recorded in the
 ## Project status and limitations
 
 DOT 0.1 is suitable for reproducible research and 2D air-core electromagnetic pre-design. A
-candidate is not a construction drawing or magnet sign-off. Independent ROXIE/measurement review,
+candidate is not a construction drawing or magnet sign-off. Independent finite-element/measurement review,
 tolerance analysis, mechanical design, protection analysis, and three-dimensional end design are
 still required for an engineering magnet.
 

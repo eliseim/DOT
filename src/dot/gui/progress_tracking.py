@@ -3,7 +3,7 @@
 dd's own GUI has an ETA/elapsed/candidates dashboard and a 3-panel
 convergence chart (target-box distance, harmonic, margin vs. evaluated-
 candidate index). This module is DOT's counterpart, adapted to what DOT
-actually has that dd doesn't: per-generation (not per-ROXIE-call) timing,
+actually has that dd doesn't: per-generation (not per-candidate-call) timing,
 and per-layer margin detail (task 0051) dd's dashboard never shows at all.
 """
 

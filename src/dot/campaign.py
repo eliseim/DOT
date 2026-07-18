@@ -45,8 +45,10 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
     if raw.get("schema_version") != 1:
         raise ValueError("campaign schema_version must be 1")
     angle_convention = raw.get("geometry_angle_convention", "dot-pole-zero")
-    if angle_convention not in {"roxie", "dot-pole-zero"}:
-        raise ValueError("geometry_angle_convention must be 'roxie' or 'dot-pole-zero'")
+    if angle_convention not in {"native-midplane-zero", "roxie", "dot-pole-zero"}:
+        raise ValueError(
+            "geometry_angle_convention must be 'native-midplane-zero' or a supported legacy value"
+        )
     name = str(raw.get("name", "")).strip()
     if not name:
         raise ValueError("campaign name must be non-empty")
@@ -297,7 +299,7 @@ def result_document(
     """Build a stable JSON-serializable result document."""
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign": campaign.name,
         "source_config": str(campaign.source_path),
         "model_boundary": "two-dimensional coil-only/no-iron magnetostatics",
@@ -381,7 +383,7 @@ def _candidate_document(index, candidate) -> dict[str, Any]:  # noqa: ANN001
         ],
         "margins_by_block": [
             {
-                "roxie_block": row.roxie_block,
+                "block": row.roxie_block,
                 "layer": row.layer_index + 1,
                 "block_in_layer": row.block_index + 1,
                 "peak_field_t": row.peak_field_t,

@@ -63,7 +63,7 @@ def test_headless_campaign_harmonic_targets_accept_b_prefix_and_signed_values() 
 def test_lhc_blind_input_contains_only_user_gaps_not_wedge_layout() -> None:
     raw = json.loads(LHC_CONFIG.read_text(encoding="utf-8"))
 
-    assert raw["geometry_angle_convention"] == "roxie"
+    assert raw["geometry_angle_convention"] == "native-midplane-zero"
     for index, layer in enumerate(raw["layers"]):
         assert layer["azimuthal_gap_mm"] == pytest.approx(0.15)
         if index:
@@ -157,6 +157,7 @@ def test_cli_quick_run_reports_progress_and_saves_generation_artifacts(
 
     output = capsys.readouterr().out
     assert exit_code == 0
+    assert "roxie" not in output.lower()
     assert "generation 1/3" in output
     assert "ETA" in output
     assert (tmp_path / "pareto.json").exists()
@@ -167,9 +168,9 @@ def test_cli_quick_run_reports_progress_and_saves_generation_artifacts(
     for snapshot_path in generation_dir.glob("gen_*.json"):
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
         first_blocks = {
-            row["layer"]: row
-            for row in snapshot["blocks"]
-            if row["block"] == 1
+                row["layer"]: row
+                for row in snapshot["blocks"]
+                if row["block_in_layer"] == 1
         }
         assert first_blocks[1]["radius_mm"] == pytest.approx(28.0)
         assert first_blocks[1]["phi_deg"] == pytest.approx(0.3069387397092032)

@@ -17,7 +17,7 @@ from pathlib import Path
 from dot.geometry import DipoleDesign
 from dot.geometry.constraints import first_layer_pole_turn_clearance_mm
 from dot.optimize.objectives import BlockMarginRecord, LayerMarginRecord
-from dot.results import block_geometry_rows, inter_block_clearance_rows
+from dot.results import block_geometry_record, block_geometry_rows, inter_block_clearance_rows
 
 from .cross_section_plot import cross_section_figure
 
@@ -61,6 +61,7 @@ def save_generation_snapshot(
     )
     target_by_order = dict(harmonic_targets)
     characteristics = {
+        "schema_version": 2,
         "generation": generation,
         "total_generations": total_generations,
         "harmonic_units": harmonic_units,
@@ -95,16 +96,24 @@ def save_generation_snapshot(
         ],
         "per_block_margin": [
             {
+                "block": record.roxie_block,
+                "layer": record.layer_index + 1,
+                "block_in_layer": record.block_index + 1,
                 "conductor": (
                     cable_labels[record.layer_index]
                     if record.layer_index < len(cable_labels)
                     else None
                 ),
-                **asdict(record),
+                "peak_field_t": record.peak_field_t,
+                "operating_current_a": record.operating_current_a,
+                "short_sample_current_a": record.short_sample_current_a,
+                "margin_percent": record.margin_percent,
             }
             for record in block_margin_records
         ],
-        "blocks": [asdict(row) for row in block_geometry_rows(design, cable_labels)],
+        "blocks": [
+            block_geometry_record(row) for row in block_geometry_rows(design, cable_labels)
+        ],
         "inter_block_clearances": [
             asdict(row) for row in inter_block_clearance_rows(design)
         ],

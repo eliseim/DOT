@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "geometry_angle_convention": "roxie",
+  "geometry_angle_convention": "native-midplane-zero",
   "benchmark": "lhc-mb-blind-no-iron",
   "provenance": {
     "generated_by": "DOT blind NSGA-II plus high-fidelity local refinement",

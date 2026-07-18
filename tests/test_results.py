@@ -51,7 +51,7 @@ def _candidate() -> ParetoCandidate:
     )
 
 
-def test_block_geometry_rows_use_native_roxie_angles() -> None:
+def test_block_geometry_rows_use_native_angles() -> None:
     rows = block_geometry_rows(_candidate().design, ("CABLE-A",))
 
     assert len(rows) == 2
@@ -83,11 +83,14 @@ def test_candidate_document_contains_geometry_harmonics_and_margin() -> None:
     assert document["operating_current_a"] == pytest.approx(500.0)
     assert document["minimum_margin_percent"] == pytest.approx(25.0)
     assert document["harmonics"][1]["normal_units"] == pytest.approx(-4.2)
-    assert document["margins_by_block"][1]["roxie_block"] == 2
+    assert document["margins_by_block"][1]["block"] == 2
     assert document["margins_by_block"][1]["margin_percent"] == pytest.approx(28.5714286)
     assert document["blocks"][1]["phi_deg"] == pytest.approx(55.0)
+    assert document["blocks"][1]["block"] == 2
+    assert document["blocks"][1]["block_in_layer"] == 2
     assert document["inter_block_clearances"][0]["layer"] == 1
     assert document["first_layer_pole_turn_clearance_mm"] > 0.0
+    assert "roxie" not in json.dumps(document).lower()
 
 
 def test_candidate_document_reports_actual_target_and_residual_harmonics() -> None:
@@ -225,7 +228,8 @@ def test_export_campaign_results_writes_designer_artifacts(tmp_path) -> None:  #
     assert best["blocks"][0]["conductor"] == "CABLE-A"
     with artifacts.block_table_csv.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    assert rows[1]["roxie_block"] == "2"
+    assert rows[1]["block"] == "2"
+    assert rows[1]["block_in_layer"] == "2"
     assert float(rows[1]["alpha_deg"]) == pytest.approx(20.0)
     shortlist = json.loads(artifacts.shortlist_manifest_json.read_text(encoding="utf-8"))
     assert shortlist["design_count"] == 1
@@ -233,7 +237,7 @@ def test_export_campaign_results_writes_designer_artifacts(tmp_path) -> None:  #
     assert not any(path.is_dir() for path in artifacts.selected_designs_dir.iterdir())
     selected = shortlist["designs"][0]
     assert (artifacts.selected_designs_dir / selected["candidate_json"]).exists()
-    assert (artifacts.selected_designs_dir / selected["roxie_blocks_csv"]).exists()
+    assert (artifacts.selected_designs_dir / selected["geometry_csv"]).exists()
     summary_image = artifacts.selected_designs_dir / selected["summary_image"]
     assert summary_image.stat().st_size > 0
     pixels = mpimg.imread(summary_image)

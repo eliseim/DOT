@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-07-19
+
+- Renamed the desktop application to **DOT - Dipole Optimization Tool**.
+- Moved Load/Save Configuration into a fixed toolbar above the main workspace.
+- Replaced solver-branded GUI, summary-image, geometry-CSV, and generated-JSON labels with neutral
+  DOT terminology while preserving legacy configuration compatibility and validation tests.
+- Renamed designer-facing block exports to `*_geometry.csv` and made continuous block numbering
+  explicit through neutral `block` / `block_in_layer` fields.
+
 ## 0.1.0 — 2026-07-18
 
 - Added linked, typed ROXIE cadata conductor/cable/insulation/REMFIT resolution.

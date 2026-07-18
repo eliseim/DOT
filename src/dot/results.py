@@ -138,10 +138,10 @@ def block_geometry_rows(
     design: DipoleDesign,
     conductor_labels: tuple[str, ...] = (),
 ) -> tuple[BlockGeometryRow, ...]:
-    """Return the exact per-block table required to recreate a ROXIE layout.
+    """Return the exact per-block table required to recreate the coil layout.
 
     ``phi`` is measured from the midplane toward the pole and ``alpha`` is
-    the absolute cable-frame angle, exactly as in the CTH-14T ROXIE table.
+    the absolute cable-frame angle.
     """
 
     rows: list[BlockGeometryRow] = []
@@ -166,6 +166,22 @@ def block_geometry_rows(
             )
             roxie_block += 1
     return tuple(rows)
+
+
+def block_geometry_record(row: BlockGeometryRow) -> dict[str, Any]:
+    """Return a neutral, designer-facing geometry record."""
+
+    return {
+        "block": row.roxie_block,
+        "layer": row.layer,
+        "block_in_layer": row.block,
+        "conductor": row.conductor,
+        "radius_mm": row.radius_mm,
+        "n_turns": row.n_turns,
+        "phi_deg": row.phi_deg,
+        "alpha_deg": row.alpha_deg,
+        "current_a": row.current_a,
+    }
 
 
 def inter_block_clearance_rows(
@@ -193,7 +209,7 @@ def candidate_document(
     reference_radius_mm: float,
     conductor_labels: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Serialize one candidate with physics and ROXIE-ready geometry."""
+    """Serialize one candidate with physics and reproducible block geometry."""
 
     operating_current = (
         candidate.operating_current_a
@@ -207,13 +223,13 @@ def candidate_document(
     )
     target_by_order = dict(candidate.harmonic_targets)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "campaign": campaign_name,
         "certified": candidate.certified,
         "harmonic_convention": "CERN/European units: 1e-4 of main normal dipole",
         "geometry_conventions": {
-            "phi": "ROXIE/CTH: 0 deg at midplane, increasing toward pole",
-            "alpha": "ROXIE absolute cable-frame angle; no conversion required",
+            "phi": "0 deg at midplane, increasing toward pole",
+            "alpha": "absolute cable-frame angle",
         },
         "reference_radius_mm": reference_radius_mm,
         "bore_field_t": _center_field_t(candidate.design),
@@ -257,7 +273,7 @@ def candidate_document(
         ],
         "margins_by_block": [
             {
-                "roxie_block": row.roxie_block,
+                "block": row.roxie_block,
                 "layer": row.layer_index + 1,
                 "block_in_layer": row.block_index + 1,
                 "conductor": (
@@ -272,7 +288,10 @@ def candidate_document(
             }
             for row in candidate.margin_by_block
         ],
-        "blocks": [asdict(row) for row in block_geometry_rows(candidate.design, conductor_labels)],
+        "blocks": [
+            block_geometry_record(row)
+            for row in block_geometry_rows(candidate.design, conductor_labels)
+        ],
         "inter_block_clearances": [
             asdict(row) for row in inter_block_clearance_rows(candidate.design)
         ],
@@ -314,7 +333,7 @@ def export_campaign_results(
     pareto_json.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign": campaign_name,
                 "best_candidate_index": best_index,
                 "candidate_count": len(documents),
@@ -336,12 +355,13 @@ def export_campaign_results(
         encoding="utf-8",
     )
 
-    block_csv = output_dir / "best_candidate_roxie_blocks.csv"
+    block_csv = output_dir / "best_candidate_geometry.csv"
     rows = block_geometry_rows(best.design, conductor_labels)
     with block_csv.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=tuple(asdict(rows[0])))
+        csv_rows = tuple(block_geometry_record(row) for row in rows)
+        writer = csv.DictWriter(stream, fieldnames=tuple(csv_rows[0]))
         writer.writeheader()
-        writer.writerows(asdict(row) for row in rows)
+        writer.writerows(csv_rows)
 
     from dot.gui.cross_section_plot import cross_section_figure
 
@@ -401,7 +421,7 @@ def export_no_candidate_result(
     destination.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign": campaign_name,
                 "best_candidate_index": None,
                 "candidate_count": 0,
@@ -476,12 +496,13 @@ def _export_design_shortlist(
         )
         candidate_json = selected_dir / f"{basename}.json"
         candidate_json.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        block_csv = selected_dir / f"{basename}_roxie_blocks.csv"
+        block_csv = selected_dir / f"{basename}_geometry.csv"
         rows = block_geometry_rows(candidate.design, conductor_labels)
         with block_csv.open("w", encoding="utf-8", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=tuple(asdict(rows[0])))
+            csv_rows = tuple(block_geometry_record(row) for row in rows)
+            writer = csv.DictWriter(stream, fieldnames=tuple(csv_rows[0]))
             writer.writeheader()
-            writer.writerows(asdict(row) for row in rows)
+            writer.writerows(csv_rows)
         summary_image = selected_dir / f"{basename}_summary.png"
         candidate_summary_figure(
             candidate,
@@ -512,14 +533,14 @@ def _export_design_shortlist(
                 ),
                 "summary_image": summary_image.name,
                 "candidate_json": candidate_json.name,
-                "roxie_blocks_csv": block_csv.name,
+                "geometry_csv": block_csv.name,
             }
         )
     manifest = selected_dir / "manifest.json"
     manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign": campaign_name,
                 "source": source,
                 "selection_policy": (
@@ -593,7 +614,7 @@ def candidate_summary_figure(
 
     geometry_rows = [
         (
-            str(row["roxie_block"]),
+            str(row["block"]),
             str(row["layer"]),
             str(row["conductor"] or "—"),
             f"{row['radius_mm']:.6g}",
@@ -605,9 +626,9 @@ def candidate_summary_figure(
     ]
     _draw_engineering_table(
         geometry_axes,
-        title="ROXIE block geometry (native ROXIE/CTH angle convention)",
+        title="Block geometry",
         columns=(
-            "ROXIE block",
+            "Block",
             "Layer",
             "Conductor",
             "R [mm]",
@@ -645,7 +666,7 @@ def _electromagnetic_summary_rows(document: dict[str, Any]) -> list[tuple[str, s
     if margin_rows:
         rows.extend(
             (
-                f"ROXIE block {row['roxie_block']} margin / Bpeak",
+                f"Block {row['block']} margin / Bpeak",
                 f"{row['margin_percent']:.4g} % / {row['peak_field_t']:.5g} T",
             )
             for row in margin_rows
@@ -707,7 +728,10 @@ def _near_feasible_documents(
             "harmonic_targets": {
                 f"b{order}": target for order, target in item.harmonic_targets
             },
-            "blocks": [asdict(row) for row in block_geometry_rows(item.design, conductor_labels)],
+            "blocks": [
+                block_geometry_record(row)
+                for row in block_geometry_rows(item.design, conductor_labels)
+            ],
         }
         for item in result.near_feasible
     ]
@@ -727,7 +751,8 @@ def _search_front_documents(
             "minimum_margin_percent": -candidate.objectives[1],
             "total_turns": _total_turns(candidate.design),
             "blocks": [
-                asdict(row) for row in block_geometry_rows(candidate.design, conductor_labels)
+                block_geometry_record(row)
+                for row in block_geometry_rows(candidate.design, conductor_labels)
             ],
         }
         for candidate in result.search_front

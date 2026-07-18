@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             min_margin_percent=campaign.targets.min_margin_percent,
         )
         print(f"best cross-section: {artifacts.cross_section_png}")
-        print(f"ROXIE block table: {artifacts.block_table_csv}")
+        print(f"Block geometry table: {artifacts.block_table_csv}")
         print(f"Pareto frontier: {artifacts.pareto_frontier_png}")
         print(f"topology-diverse shortlist: {artifacts.shortlist_manifest_json}")
     else:

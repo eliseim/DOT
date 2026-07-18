@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Autonomous 2D air-core superconducting dipole optimization and certification"
 readme = "README.md"
 requires-python = ">=3.11"
