@@ -12,6 +12,8 @@ from dot.optimize.objectives import (
     PEAK_FIELD_FILAMENTS_PER_AXIS,
     _conductor_turns_by_layer,
     _peak_field_on_own_turns,
+    _turn_boundary_sample_points,
+    load_line_margin_by_block_detail,
     load_line_margin_detail,
 )
 from dot.physics import field_at, multipole_coefficients, place_line_current_sources
@@ -28,6 +30,88 @@ def test_field_quality_objective_matches_direct_multipole_calculation() -> None:
     actual = field_quality_objective(design, r_ref_mm=r_ref_mm, max_order=max_order)
 
     assert actual == pytest.approx(expected, rel=0.0, abs=1.0e-12)
+
+
+def test_field_quality_objective_can_select_allowed_normal_orders_explicitly() -> None:
+    design = _asymmetric_design(current_a=250.0)
+    sources = tuple(
+        source
+        for turn in design.all_turns()
+        for source in place_line_current_sources(turn)
+    )
+    coefficients = multipole_coefficients(sources, order=7, r_ref_mm=5.0)
+
+    actual = field_quality_objective(
+        design,
+        r_ref_mm=5.0,
+        max_order=7,
+        normal_orders=(3, 5, 7),
+        include_skew=False,
+    )
+
+    assert actual == pytest.approx(
+        max(abs(coefficients[order - 1][0]) for order in (3, 5, 7)),
+        rel=0.0,
+        abs=1.0e-12,
+    )
+
+
+def test_field_quality_objective_scores_signed_normal_harmonic_targets() -> None:
+    design = _asymmetric_design(current_a=250.0)
+    sources = tuple(
+        source
+        for turn in design.all_turns()
+        for source in place_line_current_sources(turn)
+    )
+    b3 = multipole_coefficients(sources, order=3, r_ref_mm=5.0)[2][0]
+
+    actual = field_quality_objective(
+        design,
+        r_ref_mm=5.0,
+        max_order=3,
+        normal_orders=(3,),
+        normal_targets={3: b3 - 2.5},
+        include_skew=False,
+    )
+
+    assert actual == pytest.approx(2.5, rel=0.0, abs=1.0e-12)
+
+
+def test_bare_conductor_preserves_each_keystoned_turn_frame() -> None:
+    cable = CableSpec(
+        height_mm=15.1,
+        width_inner_mm=1.736,
+        width_outer_mm=2.064,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=28.0,
+        layers=(
+            Layer(
+                inner_radius_mm=28.15,
+                blocks=(
+                    Block(
+                        phi_deg=70.0,
+                        alpha_deg=-12.0,
+                        n_turns=4,
+                        cable=cable,
+                        inner_radius_mm=28.15,
+                        current_a=1000.0,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    insulated = design.layers[0].blocks[0].turns()
+    bare = tuple(item.turn for item in _conductor_turns_by_layer(design))
+
+    assert [turn.alpha_deg for turn in bare] == pytest.approx(
+        [turn.alpha_deg for turn in insulated]
+    )
+    assert len(set(turn.alpha_deg for turn in bare)) == 4
+    assert [turn.anchor for turn in bare] == [turn.anchor for turn in insulated]
 
 
 def test_load_line_margin_objective_matches_direct_loadline_solver_inputs() -> None:
@@ -116,6 +200,40 @@ def test_load_line_margin_requires_at_least_one_supported_layer() -> None:
             cadata_by_layer=(None, None),
             temperature_k=0.0,
         )
+
+
+def test_block_margin_detail_uses_continuous_roxie_numbering() -> None:
+    design = _two_layer_design(current_a=250.0)
+    inner = design.layers[0]
+    extra = Block(
+        phi_deg=55.0,
+        alpha_deg=0.0,
+        n_turns=1,
+        cable=inner.blocks[0].cable,
+        inner_radius_mm=inner.inner_radius_mm,
+        current_a=250.0,
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=design.aperture_radius_mm,
+        layers=(
+            Layer(inner_radius_mm=inner.inner_radius_mm, blocks=(*inner.blocks, extra)),
+            design.layers[1],
+        ),
+    )
+
+    records = load_line_margin_by_block_detail(
+        design,
+        cadata_by_layer=(conductor_data(), conductor_data()),
+        temperature_k=0.0,
+    )
+
+    assert [record.roxie_block for record in records] == [1, 2, 3]
+    assert [(record.layer_index, record.block_index) for record in records] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+    ]
+    assert all(math.isfinite(record.margin_percent) for record in records)
 
 
 def test_peak_field_uses_bare_conductor_geometry_not_insulation_boundary() -> None:
@@ -225,22 +343,13 @@ def _direct_peak_field_layer_and_value(design: DipoleDesign) -> tuple[int, float
     best_layer = -1
     best_field = -math.inf
     for indexed in indexed_turns:
-        for x_mm, y_mm in _sample_points(indexed.turn.corners):
+        for x_mm, y_mm in _turn_boundary_sample_points(indexed.turn):
             bx_t, by_t = field_at(sources, x_mm, y_mm)
             magnitude = math.hypot(bx_t, by_t)
             if magnitude > best_field:
                 best_layer = indexed.layer_index
                 best_field = magnitude
     return best_layer, best_field
-
-
-def _sample_points(corners):
-    edge_midpoints = tuple(
-        ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
-        for start, end in zip(corners, (*corners[1:], corners[0]), strict=True)
-    )
-    return (*corners, *edge_midpoints)
-
 
 def conductor_data() -> LayerConductorData:
     strand = StrandRecord(diameter_mm=1.0, cu_to_sc_ratio=0.0)

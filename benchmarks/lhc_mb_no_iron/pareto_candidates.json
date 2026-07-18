@@ -1,0 +1,191 @@
+{
+  "schema_version": 2,
+  "campaign": "lhc-mb-blind-no-iron",
+  "best_candidate_index": 0,
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "schema_version": 2,
+      "campaign": "lhc-mb-blind-no-iron",
+      "certified": true,
+      "harmonic_convention": "CERN/European units: 1e-4 of main normal dipole",
+      "geometry_conventions": {
+        "phi": "ROXIE/CTH: 0 deg at midplane, increasing toward pole",
+        "alpha": "ROXIE absolute cable-frame angle; no conversion required"
+      },
+      "reference_radius_mm": 17.0,
+      "bore_field_t": 7.0,
+      "operating_current_a": 10825.442397475106,
+      "worst_harmonic_units": 4.965441750312194,
+      "minimum_margin_percent": 27.744665294499292,
+      "first_layer_pole_turn_clearance_mm": 5.106890032561411,
+      "harmonics": [
+        {
+          "order": 1,
+          "normal_units": 10000.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 2,
+          "normal_units": 0.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 3,
+          "normal_units": -3.8532113861333834,
+          "skew_units": 0.0
+        },
+        {
+          "order": 4,
+          "normal_units": 0.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 5,
+          "normal_units": -4.965441750312194,
+          "skew_units": 0.0
+        },
+        {
+          "order": 6,
+          "normal_units": 0.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 7,
+          "normal_units": -4.005450356644876,
+          "skew_units": 0.0
+        },
+        {
+          "order": 8,
+          "normal_units": 0.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 9,
+          "normal_units": 0.8944984749643416,
+          "skew_units": 0.0
+        },
+        {
+          "order": 10,
+          "normal_units": 0.0,
+          "skew_units": 0.0
+        },
+        {
+          "order": 11,
+          "normal_units": 0.12277029324867338,
+          "skew_units": 0.0
+        }
+      ],
+      "margins_by_layer": [
+        {
+          "layer": 1,
+          "conductor": "YELLONIN",
+          "peak_field_t": 7.336447818556426,
+          "operating_current_a": 10825.442397475106,
+          "short_sample_current_a": 14982.205039389264,
+          "margin_percent": 27.744665294499292
+        },
+        {
+          "layer": 2,
+          "conductor": "YELLONOU",
+          "peak_field_t": 6.1264043481036055,
+          "operating_current_a": 10825.442397475106,
+          "short_sample_current_a": 15353.619683791196,
+          "margin_percent": 29.49257165133824
+        }
+      ],
+      "blocks": [
+        {
+          "layer": 1,
+          "block": 1,
+          "roxie_block": 1,
+          "conductor": "YELLONIN",
+          "radius_mm": 28.15,
+          "n_turns": 13,
+          "phi_deg": 0.3053,
+          "alpha_deg": 0.0,
+          "current_a": 10825.442397475106
+        },
+        {
+          "layer": 1,
+          "block": 2,
+          "roxie_block": 2,
+          "conductor": "YELLONIN",
+          "radius_mm": 28.15,
+          "n_turns": 1,
+          "phi_deg": 60.0912,
+          "alpha_deg": 18.6289,
+          "current_a": 10825.442397475106
+        },
+        {
+          "layer": 1,
+          "block": 3,
+          "roxie_block": 3,
+          "conductor": "YELLONIN",
+          "radius_mm": 28.15,
+          "n_turns": 3,
+          "phi_deg": 67.2204,
+          "alpha_deg": 44.3426,
+          "current_a": 10825.442397475106
+        },
+        {
+          "layer": 2,
+          "block": 1,
+          "roxie_block": 4,
+          "conductor": "YELLONOU",
+          "radius_mm": 44.04,
+          "n_turns": 13,
+          "phi_deg": 0.1951,
+          "alpha_deg": 0.0,
+          "current_a": 10825.442397475106
+        },
+        {
+          "layer": 2,
+          "block": 2,
+          "roxie_block": 5,
+          "conductor": "YELLONOU",
+          "radius_mm": 44.04,
+          "n_turns": 13,
+          "phi_deg": 28.132,
+          "alpha_deg": 25.4669,
+          "current_a": 10825.442397475106
+        }
+      ],
+      "inter_block_clearances": [
+        {
+          "layer": 1,
+          "block_a": 1,
+          "block_b": 2,
+          "closest_turn_a": 13,
+          "closest_turn_b": 1,
+          "closest_distance_mm": 0.33057666543649916
+        },
+        {
+          "layer": 1,
+          "block_a": 1,
+          "block_b": 3,
+          "closest_turn_a": 13,
+          "closest_turn_b": 1,
+          "closest_distance_mm": 4.467027524060722
+        },
+        {
+          "layer": 1,
+          "block_a": 2,
+          "block_b": 3,
+          "closest_turn_a": 1,
+          "closest_turn_b": 1,
+          "closest_distance_mm": 1.4780323617231732
+        },
+        {
+          "layer": 2,
+          "block_a": 1,
+          "block_b": 2,
+          "closest_turn_a": 13,
+          "closest_turn_b": 1,
+          "closest_distance_mm": 0.1895476856217131
+        }
+      ]
+    }
+  ],
+  "near_feasible": []
+}

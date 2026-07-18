@@ -157,6 +157,42 @@ def test_first_block_alpha_is_not_a_genome_slot() -> None:
     assert [block.alpha_deg for block in decoded.layers[0].blocks] == [0.0, 45.0]
 
 
+def test_user_fixed_layer_anchor_is_not_changed_by_genome_values() -> None:
+    cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=2,
+                inner_radius_bounds_mm=(12.0, 12.0),
+                phi_bounds_deg=(5.0, 90.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(-75.0, 15.0),
+                inner_radius_mm=12.0,
+                first_block_phi_deg=87.5,
+                first_block_alpha_deg=-3.0,
+            ),
+        ),
+        cables={"inner": cable},
+    )
+
+    lower, upper = genome_bounds(topology)
+    assert lower[:3].tolist() == pytest.approx([12.0, 87.5, 1.0])
+    assert upper[:3].tolist() == pytest.approx([12.0, 87.5, 5.0])
+
+    decoded = decode(
+        [999.0, 1.0, 4.0, 30.0, 2.0, 1.0, -20.0],
+        topology,
+        topology.cables,
+    )
+    first = decoded.layers[0].blocks[0]
+    assert first.inner_radius_mm == pytest.approx(12.0)
+    assert first.phi_deg == pytest.approx(87.5)
+    assert first.alpha_deg == pytest.approx(-3.0)
+    assert first.n_turns == 4
+
+
 def test_optional_block_active_genes_control_decoded_block_count() -> None:
     cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
     topology = Topology(
@@ -220,23 +256,19 @@ def test_genome_bounds_match_topology_order() -> None:
 
     assert lower.shape == (topology.n_var,)
     assert upper.shape == (topology.n_var,)
-    # Block 0 has alpha_deg hard-fixed to 0 (see genome.py decode()), which
-    # is only geometrically valid near the midplane (phi_deg=90), so it
-    # gets the window closest to phi_upper; increasing block index moves
-    # toward phi_lower (the pole), where the free alpha gene compensates.
     assert lower.tolist() == pytest.approx(
         [
             10.0,
-                32.5,
+                5.0,
             1.0,
             5.0,
                 1.0,
                 0.0,
                 -10.0,
                 22.0,
-                58.333333333333336,
+                15.0,
             1.0,
-                36.66666666666667,
+                15.0,
                 1.0,
                 0.0,
                 -5.0,
@@ -251,18 +283,18 @@ def test_genome_bounds_match_topology_order() -> None:
             20.0,
                 60.0,
             5.0,
-            32.5,
+            60.0,
                 5.0,
                 1.0,
                 70.0,
                 30.0,
                 80.0,
             6.0,
-                58.333333333333336,
+                80.0,
                 6.0,
                 1.0,
                 68.0,
-                36.66666666666667,
+                80.0,
                 6.0,
                 1.0,
                 68.0,
@@ -270,7 +302,7 @@ def test_genome_bounds_match_topology_order() -> None:
     )
 
 
-def test_genome_bounds_partitions_four_block_phi_window() -> None:
+def test_genome_bounds_give_every_block_the_full_phi_window() -> None:
     topology = Topology(
         aperture_radius_mm=8.0,
         layers=(
@@ -287,11 +319,9 @@ def test_genome_bounds_partitions_four_block_phi_window() -> None:
 
     lower, upper = genome_bounds(topology)
 
-    # Block 0 gets the window nearest phi_upper (midplane); increasing block
-    # index moves toward phi_lower (pole).
     phi_slots = [1, 3, 7, 11]
-    assert lower[phi_slots].tolist() == pytest.approx([59.0, 40.0, 21.0, 2.0])
-    assert upper[phi_slots].tolist() == pytest.approx([78.0, 59.0, 40.0, 21.0])
+    assert lower[phi_slots].tolist() == pytest.approx([2.0, 2.0, 2.0, 2.0])
+    assert upper[phi_slots].tolist() == pytest.approx([78.0, 78.0, 78.0, 78.0])
 
 
 def test_genome_bounds_leaves_single_block_phi_bounds_unchanged() -> None:
@@ -315,7 +345,7 @@ def test_genome_bounds_leaves_single_block_phi_bounds_unchanged() -> None:
     assert upper.tolist() == [20.0, 78.0, 5.0]
 
 
-def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -> None:
+def test_optional_block_slot_does_not_change_reachable_phi_range() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
     topology = Topology(
         aperture_radius_mm=8.0,
@@ -339,16 +369,9 @@ def test_partitioned_phi_windows_materially_improve_random_feasible_fraction() -
     )
     new_lower, new_upper = genome_bounds(topology)
 
-    old_feasible = _sample_feasible_count(topology, old_lower, old_upper)
-    new_feasible = _sample_feasible_count(topology, new_lower, new_upper)
-
-    assert old_feasible == 42
-    # Block 0 now gets the window nearest phi_upper (midplane) instead of
-    # phi_lower (pole) -- same random draws land in different windows, so
-    # the exact feasible count differs from before that fix, but the
-    # material improvement over the unpartitioned baseline still holds.
-    assert new_feasible == 182
-    assert new_feasible >= old_feasible + 50
+    phi_slots = [1, 3, 7, 11]
+    assert new_lower[phi_slots].tolist() == old_lower[phi_slots].tolist()
+    assert new_upper[phi_slots].tolist() == old_upper[phi_slots].tolist()
 
 
 def _sample_feasible_count(
@@ -384,6 +407,29 @@ def test_layer_topology_validates_alpha_bounds_order() -> None:
             n_turns_bounds=(1, 5),
             alpha_bounds_deg=(70.0, -10.0),
         )
+
+
+def test_layer_topology_validates_min_blocks_not_greater_than_n_blocks() -> None:
+    with pytest.raises(ValueError, match="min_blocks must be <= n_blocks"):
+        LayerTopology(
+            cable_id="inner",
+            n_blocks=2,
+            inner_radius_bounds_mm=(10.0, 20.0),
+            phi_bounds_deg=(5.0, 60.0),
+            n_turns_bounds=(1, 5),
+            min_blocks=3,
+        )
+
+
+def test_layer_topology_min_blocks_defaults_to_one() -> None:
+    layer = LayerTopology(
+        cable_id="inner",
+        n_blocks=4,
+        inner_radius_bounds_mm=(10.0, 20.0),
+        phi_bounds_deg=(5.0, 60.0),
+        n_turns_bounds=(1, 5),
+    )
+    assert layer.min_blocks == 1
 
 
 def test_genome_indexing_and_bounds_consistency() -> None:

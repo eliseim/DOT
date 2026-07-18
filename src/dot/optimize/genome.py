@@ -1,12 +1,11 @@
 """Genome encoding for fixed-maximum-topology coil optimization.
 
 The topology is fixed by the caller: layer count, maximum block count per layer,
-and the cable assigned to each layer are not search variables.  The genome
-stores one continuous inner radius per layer and, per block slot, one continuous
-azimuthal angle plus one integer turn count.  The first block in each layer is
-always active, has ``alpha_deg`` fixed to zero, and has no active or alpha genome
-slot; later block slots store an active/inactive gene and one continuous
-``alpha_deg`` value.
+and the cable assigned to each layer are not search variables. New designer
+workflows also fix each layer radius and the first (midplane) block's ``phi`` and
+``alpha``. Their retained flat-vector slots have point bounds for backward
+compatibility, so only the first block's turn count remains a real decision.
+Later block slots store ``phi``, turns, active/inactive, and ``alpha`` genes.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from pymoo.core.variable import Binary, Integer, Real
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 
-DEFAULT_ALPHA_BOUNDS_DEG = (-10.0, 70.0)
+DEFAULT_ALPHA_BOUNDS_DEG = (-15.0, 75.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +36,15 @@ class GenomeVariable:
 
 @dataclass(frozen=True, slots=True)
 class LayerTopology:
-    """Maximum topology and variable bounds for one coil layer."""
+    """Maximum topology and variable bounds for one coil layer.
+
+    ``n_blocks`` is the maximum active-block count (a genome-size concept:
+    it fixes how many block slots exist). ``min_blocks`` is a separate
+    *search-pressure* floor -- dd's own ``min_active_blocks_per_layer``
+    (its topology-collapse review recommends >=2 in the harmonic-dominant
+    inner layers "so wedge angles exist to cancel harmonics"). Sampling and
+    repair honor it; it does not change the genome's shape.
+    """
 
     cable_id: str
     n_blocks: int
@@ -45,6 +52,10 @@ class LayerTopology:
     phi_bounds_deg: tuple[float, float]
     n_turns_bounds: tuple[int, int]
     alpha_bounds_deg: tuple[float, float] = DEFAULT_ALPHA_BOUNDS_DEG
+    min_blocks: int = 1
+    inner_radius_mm: float | None = None
+    first_block_phi_deg: float | None = None
+    first_block_alpha_deg: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.cable_id:
@@ -58,6 +69,26 @@ class LayerTopology:
         _require_positive_int(upper, "n_turns_bounds upper")
         if lower > upper:
             raise ValueError("n_turns_bounds lower must be <= upper")
+        _require_positive_int(self.min_blocks, "min_blocks")
+        if self.min_blocks > self.n_blocks:
+            raise ValueError("min_blocks must be <= n_blocks")
+        if self.inner_radius_mm is not None:
+            _require_finite_positive(self.inner_radius_mm, "inner_radius_mm")
+            if not (
+                self.inner_radius_bounds_mm[0]
+                <= self.inner_radius_mm
+                <= self.inner_radius_bounds_mm[1]
+            ):
+                raise ValueError("inner_radius_mm must lie within inner_radius_bounds_mm")
+        if self.first_block_phi_deg is not None:
+            _require_finite(self.first_block_phi_deg, "first_block_phi_deg")
+            if not (
+                self.phi_bounds_deg[0]
+                <= self.first_block_phi_deg
+                <= self.phi_bounds_deg[1]
+            ):
+                raise ValueError("first_block_phi_deg must lie within phi_bounds_deg")
+        _require_finite(self.first_block_alpha_deg, "first_block_alpha_deg")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +126,22 @@ def encode(design: DipoleDesign, topology: Topology | None = None) -> np.ndarray
         layer_topology = None if topology is None else topology.layers[layer_index]
         if layer_topology is not None and len(layer.blocks) > layer_topology.n_blocks:
             raise ValueError("design has more blocks than topology maximum")
-        values.append(layer.inner_radius_mm)
+        values.append(
+            layer.inner_radius_mm
+            if layer_topology is None or layer_topology.inner_radius_mm is None
+            else layer_topology.inner_radius_mm
+        )
         max_blocks = len(layer.blocks) if layer_topology is None else layer_topology.n_blocks
         for block_index in range(max_blocks):
             if block_index < len(layer.blocks):
                 block = layer.blocks[block_index]
-                values.append(block.phi_deg)
+                values.append(
+                    block.phi_deg
+                    if layer_topology is None
+                    or block_index > 0
+                    or layer_topology.first_block_phi_deg is None
+                    else layer_topology.first_block_phi_deg
+                )
                 values.append(float(block.n_turns))
                 if block_index > 0:
                     values.append(1.0)
@@ -108,9 +149,8 @@ def encode(design: DipoleDesign, topology: Topology | None = None) -> np.ndarray
                 continue
             if layer_topology is None:
                 break
-            phi_lower, phi_upper = layer_topology.phi_bounds_deg
-            window_width = (phi_upper - phi_lower) / layer_topology.n_blocks
-            values.append(phi_lower + block_index * window_width)
+            phi_lower, _phi_upper = layer_topology.phi_bounds_deg
+            values.append(phi_lower)
             values.append(float(layer_topology.n_turns_bounds[0]))
             if block_index > 0:
                 values.append(0.0)
@@ -138,13 +178,21 @@ def decode(
     layers: list[Layer] = []
     index = 0
     for layer_topology in topology.layers:
-        inner_radius_mm = float(values[index])
+        inner_radius_mm = (
+            float(values[index])
+            if layer_topology.inner_radius_mm is None
+            else layer_topology.inner_radius_mm
+        )
         _require_finite(inner_radius_mm, "inner_radius_mm")
         index += 1
         cable = cables[layer_topology.cable_id]
         blocks: list[Block] = []
         for block_index in range(layer_topology.n_blocks):
-            phi_deg = float(values[index])
+            phi_deg = (
+                float(values[index])
+                if block_index > 0 or layer_topology.first_block_phi_deg is None
+                else layer_topology.first_block_phi_deg
+            )
             _require_finite(phi_deg, "phi_deg")
             raw_turns = values[index + 1]
             _require_finite(float(raw_turns), "n_turns")
@@ -156,7 +204,7 @@ def decode(
             index += 2
             if block_index == 0:
                 is_active = True
-                alpha_deg = 0.0
+                alpha_deg = layer_topology.first_block_alpha_deg
             else:
                 raw_active = values[index]
                 _require_finite(float(raw_active), "active")
@@ -188,21 +236,23 @@ def genome_bounds(topology: Topology) -> tuple[np.ndarray, np.ndarray]:
     upper: list[float] = []
     for layer in topology.layers:
         phi_lower, phi_upper = layer.phi_bounds_deg
-        window_width = (phi_upper - phi_lower) / layer.n_blocks
-        lower.append(layer.inner_radius_bounds_mm[0])
-        upper.append(layer.inner_radius_bounds_mm[1])
+        radius_lower, radius_upper = layer.inner_radius_bounds_mm
+        if layer.inner_radius_mm is not None:
+            radius_lower = radius_upper = layer.inner_radius_mm
+        lower.append(radius_lower)
+        upper.append(radius_upper)
         for block_index in range(layer.n_blocks):
-            # Block index 0 has alpha_deg hard-fixed to 0 (see decode()),
-            # which is only geometrically valid near the midplane
-            # (phi_deg=90, per primitives.py's phi convention). So block 0
-            # must get the window closest to phi_upper (the midplane side)
-            # and increasing block index must move toward phi_lower (the
-            # pole side), where the free alpha gene on blocks 1..n-1 can
-            # compensate. This matches the verified reference convention
-            # in dipole_designer (blocks stored ascending pole-ward from
-            # the midplane block, which is always alpha=0).
-            block_phi_lower = phi_upper - (block_index + 1) * window_width
-            block_phi_upper = phi_upper - block_index * window_width
+            # Every optional slot must span the same physical azimuth range.
+            # Slot-specific partitions made the reachable angle of a
+            # two-block winding depend on which binary slot happened to be
+            # active. Ordering and finite cable clearance are imposed by the
+            # constructive sampler/repair, where they belong.
+            block_phi_lower = phi_lower
+            block_phi_upper = phi_upper
+            if block_index == 0 and layer.first_block_phi_deg is not None:
+                block_phi_lower = block_phi_upper = layer.first_block_phi_deg
+            elif block_index > 0 and layer.first_block_phi_deg is not None:
+                block_phi_lower = max(block_phi_lower, layer.first_block_phi_deg)
             lower.extend((block_phi_lower, float(layer.n_turns_bounds[0])))
             upper.extend((block_phi_upper, float(layer.n_turns_bounds[1])))
             if block_index > 0:

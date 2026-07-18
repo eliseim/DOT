@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: "DOT: Dipole Optimization Tool"
+message: "If you use DOT in published work, cite this software and the validation sources listed in its implementation report."
+type: software
+authors:
+  - family-names: "Elisei"
+    given-names: "Mattia"
+    affiliation: "INFN Milan and University of Rome La Sapienza"
+license: MIT
+version: 0.1.0
+date-released: 2026-07-18

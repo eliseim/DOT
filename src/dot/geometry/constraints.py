@@ -8,9 +8,15 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Iterator
 
+from ._kernels import (
+    convex_polygon_distance as _convex_polygon_distance,
+    convex_polygon_overlap_depth as _convex_polygon_overlap_depth,
+    convex_polygons_overlap as _convex_polygons_overlap,
+)
 from .primitives import DipoleDesign, Point, TurnPolygon
 
 _EPSILON = 1e-9
+DEFAULT_GEOMETRY_TOLERANCE_MM = 0.005
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +49,23 @@ class FeasibilityResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InterBlockClearance:
+    """Closest polygon-to-polygon distance for one pair of blocks.
+
+    Indices are zero based in the physics API.  ``distance_mm`` is negative
+    when the closest turn polygons overlap; otherwise it is the exact
+    Euclidean distance between their closest points.
+    """
+
+    layer_index: int
+    block_index: int
+    other_block_index: int
+    turn_index: int
+    other_turn_index: int
+    distance_mm: float
+
+
+@dataclass(frozen=True, slots=True)
 class _IndexedTurn:
     layer_index: int
     block_index: int
@@ -53,13 +76,14 @@ class _IndexedTurn:
 def check_aperture_clearance(
     design: DipoleDesign,
     aperture_radius_mm: float,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
     """Check that no turn intrudes into the circular beam aperture."""
 
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
         clearance = _distance_origin_to_polygon(indexed.turn.corners) - aperture_radius_mm
-        if clearance < -_EPSILON:
+        if clearance < -tolerance_mm:
             violations.append(
                 Violation(
                     constraint_name="aperture_clearance",
@@ -79,8 +103,16 @@ def check_aperture_clearance(
 def check_inter_layer_spacing(
     design: DipoleDesign,
     min_clearance_mm: float = 0.1,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
-    """Check consecutive layers have the required radial clearance."""
+    """Check the specified radial spacer between consecutive layer mandrels.
+
+    For generated windings, the radial gap is the difference between nominal
+    layer radii after subtracting the inner layer cable's insulated radial
+    height. This matches how ROXIE layer radii and inter-layer spacers are
+    specified. Polygon collision remains an independent constraint. Hand-built
+    polygon fixtures without cable metadata use local polygon distance.
+    """
 
     violations: list[Violation] = []
     non_empty_layers = [
@@ -94,26 +126,65 @@ def check_inter_layer_spacing(
         strict=False,
     ):
 
-        inner_outer_radius = max(
-            _max_vertex_radius(indexed.turn.corners) for indexed in inner_turns
+        inner_layer = design.layers[inner_layer_index]
+        outer_layer = design.layers[outer_layer_index]
+        radial_heights = tuple(
+            block.cable.insulated_height_mm
+            for block in inner_layer.blocks
+            if getattr(block, "cable", None) is not None
         )
-        outer_inner_radius = min(
-            _distance_origin_to_polygon(indexed.turn.corners) for indexed in outer_turns
-        )
-        required_radius = inner_outer_radius + min_clearance_mm
-        if outer_inner_radius < required_radius - _EPSILON:
+        if radial_heights:
+            gap = (
+                outer_layer.inner_radius_mm
+                - inner_layer.inner_radius_mm
+                - max(radial_heights)
+            )
+            if gap < min_clearance_mm - tolerance_mm:
+                violations.append(
+                    Violation(
+                        constraint_name="inter_layer_spacing",
+                        message=(
+                            f"Radial spacer between layers {inner_layer_index} and "
+                            f"{outer_layer_index} is {gap:.6g} mm, below required "
+                            f"{min_clearance_mm:.6g} mm."
+                        ),
+                        severity=min_clearance_mm - gap,
+                        layer_index=outer_layer_index,
+                        other_layer_index=inner_layer_index,
+                    )
+                )
+            continue
+
+        closest: tuple[float, _IndexedTurn, _IndexedTurn] | None = None
+        for inner in inner_turns:
+            for outer in outer_turns:
+                if _convex_polygons_overlap(inner.turn.corners, outer.turn.corners):
+                    gap = -_convex_polygon_overlap_depth(
+                        inner.turn.corners, outer.turn.corners
+                    )
+                else:
+                    gap = _convex_polygon_distance(inner.turn.corners, outer.turn.corners)
+                if closest is None or gap < closest[0]:
+                    closest = (gap, inner, outer)
+        if closest is None:
+            continue
+        gap, inner, outer = closest
+        if gap < min_clearance_mm - tolerance_mm:
             violations.append(
                 Violation(
                     constraint_name="inter_layer_spacing",
                     message=(
-                        f"Layer {outer_layer_index} starts at radius "
-                        f"{outer_inner_radius:.6g} mm, below required "
-                        f"{required_radius:.6g} mm after layer "
-                        f"{inner_layer_index}."
+                        f"Local clearance between layers {inner_layer_index} and "
+                        f"{outer_layer_index} is {gap:.6g} mm, below required "
+                        f"{min_clearance_mm:.6g} mm."
                     ),
-                    severity=required_radius - outer_inner_radius,
-                    layer_index=outer_layer_index,
-                    other_layer_index=inner_layer_index,
+                    severity=min_clearance_mm - gap,
+                    layer_index=outer.layer_index,
+                    block_index=outer.block_index,
+                    turn_index=outer.turn_index,
+                    other_layer_index=inner.layer_index,
+                    other_block_index=inner.block_index,
+                    other_turn_index=inner.turn_index,
                 )
             )
     return violations
@@ -177,15 +248,73 @@ def check_layer_nesting(design: DipoleDesign) -> list[Violation]:
     return violations
 
 
+def check_extended_lower_edge_nesting(design: DipoleDesign) -> list[Violation]:
+    """Require outer layers below the prolonged lower side of the pole turn.
+
+    This supplements the classical pole-side nesting line with the more
+    conservative construction shown in ``corr2``: prolong the lower
+    (midplane-side) long edge of the inner layer's pole-most turn and keep
+    the complete next layer on the origin side of that line.
+    """
+
+    violations: list[Violation] = []
+    non_empty_layers = [
+        (layer_index, turns)
+        for layer_index in range(len(design.layers))
+        if (turns := tuple(_iter_layer_turns(design, layer_index)))
+    ]
+    for (inner_layer_index, inner_turns), (outer_layer_index, outer_turns) in zip(
+        non_empty_layers,
+        non_empty_layers[1:],
+        strict=False,
+    ):
+        edge = _layer_lower_side_nesting_edge(inner_turns)
+        if edge is None:
+            continue
+        p1, p2 = edge
+        edge_length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if edge_length <= _EPSILON:
+            continue
+        origin_side = _signed_half_plane_value(p1, p2, (0.0, 0.0))
+        if abs(origin_side) <= _EPSILON:
+            continue
+        accepted_sign = 1.0 if origin_side >= 0.0 else -1.0
+        for indexed in outer_turns:
+            for vertex in indexed.turn.corners:
+                distance = (
+                    accepted_sign
+                    * _signed_half_plane_value(p1, p2, vertex)
+                    / edge_length
+                )
+                if distance < -_EPSILON:
+                    violations.append(
+                        Violation(
+                            constraint_name="extended_lower_edge_nesting",
+                            message=(
+                                f"Layer {outer_layer_index} conductor extends "
+                                f"{-distance:.6g} mm past the prolonged lower side "
+                                f"of layer {inner_layer_index}'s pole-most turn -- "
+                                "the conservative winding envelope is violated."
+                            ),
+                            severity=-distance,
+                            layer_index=outer_layer_index,
+                            block_index=indexed.block_index,
+                            turn_index=indexed.turn_index,
+                            other_layer_index=inner_layer_index,
+                        )
+                    )
+    return violations
+
+
 def _layer_pole_side_nesting_edge(
     layer_turns: tuple[_IndexedTurn, ...],
 ) -> tuple[Point, Point] | None:
     if not layer_turns:
         return None
-    pole_most_block_index = min(
+    pole_most_block_index = max(
         {indexed.block_index for indexed in layer_turns},
-        key=lambda block_index: min(
-            _angle_from_y_axis_deg(vertex)
+        key=lambda block_index: max(
+            _angle_from_midplane_deg(vertex)
             for indexed in layer_turns
             if indexed.block_index == block_index
             for vertex in indexed.turn.corners
@@ -197,16 +326,41 @@ def _layer_pole_side_nesting_edge(
     return last_turn.corners[1], last_turn.corners[2]
 
 
+def _layer_lower_side_nesting_edge(
+    layer_turns: tuple[_IndexedTurn, ...],
+) -> tuple[Point, Point] | None:
+    if not layer_turns:
+        return None
+    pole_most_block_index = max(
+        {indexed.block_index for indexed in layer_turns},
+        key=lambda block_index: max(
+            _angle_from_midplane_deg(vertex)
+            for indexed in layer_turns
+            if indexed.block_index == block_index
+            for vertex in indexed.turn.corners
+        ),
+    )
+    block_turns = [
+        indexed for indexed in layer_turns if indexed.block_index == pole_most_block_index
+    ]
+    pole_most_turn = max(indexed.turn_index for indexed in block_turns)
+    last_turn = next(
+        indexed.turn for indexed in block_turns if indexed.turn_index == pole_most_turn
+    )
+    return last_turn.corners[0], last_turn.corners[3]
+
+
 def check_midplane_clearance(
     design: DipoleDesign,
     min_gap_mm: float,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
     """Check every turn remains at least ``min_gap_mm`` above y=0."""
 
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
         min_y = min(y for _, y in indexed.turn.corners)
-        if min_y < min_gap_mm - _EPSILON:
+        if min_y < min_gap_mm - tolerance_mm:
             violations.append(
                 Violation(
                     constraint_name="midplane_clearance",
@@ -226,6 +380,7 @@ def check_midplane_clearance(
 def check_pole_clearance(
     design: DipoleDesign,
     min_gap_mm: float,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
     """Check every turn remains at least ``min_gap_mm`` clear of x=0 (the pole axis).
 
@@ -238,7 +393,7 @@ def check_pole_clearance(
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
         min_x = min(x for x, _ in indexed.turn.corners)
-        if min_x < min_gap_mm - _EPSILON:
+        if min_x < min_gap_mm - tolerance_mm:
             violations.append(
                 Violation(
                     constraint_name="pole_clearance",
@@ -255,7 +410,10 @@ def check_pole_clearance(
     return violations
 
 
-def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
+def check_turn_non_intersection(
+    design: DipoleDesign,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
+) -> list[Violation]:
     """Check all turn quadrilaterals are free of positive-area overlap."""
 
     violations: list[Violation] = []
@@ -264,6 +422,8 @@ def check_turn_non_intersection(design: DipoleDesign) -> list[Violation]:
         for right in turns[left_index + 1 :]:
             if _convex_polygons_overlap(left.turn.corners, right.turn.corners):
                 overlap_depth = _convex_polygon_overlap_depth(left.turn.corners, right.turn.corners)
+                if overlap_depth <= tolerance_mm:
+                    continue
                 violations.append(
                     Violation(
                         constraint_name="turn_non_intersection",
@@ -293,7 +453,8 @@ WEDGE_GAP_MIN_MM = 1.0
 
 def check_inter_block_gap(
     design: DipoleDesign,
-    min_gap_mm: float,
+    min_gap_mm: float | Sequence[float],
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
     """Check turns from different blocks in the same layer clear a minimum gap.
 
@@ -308,7 +469,9 @@ def check_inter_block_gap(
     and :func:`check_wedge_gap` for dd's exact two-tier thresholds.
     """
 
-    return _inter_block_gap_violations(design, min_gap_mm, "inter_block_gap")
+    return _inter_block_gap_violations(
+        design, min_gap_mm, "inter_block_gap", tolerance_mm
+    )
 
 
 def check_electrical_gap(design: DipoleDesign, min_gap_mm: float = ELECTRICAL_GAP_MIN_MM) -> list[Violation]:
@@ -325,78 +488,170 @@ def check_wedge_gap(design: DipoleDesign, min_gap_mm: float = WEDGE_GAP_MIN_MM) 
 
 def _inter_block_gap_violations(
     design: DipoleDesign,
-    min_gap_mm: float,
+    min_gap_mm: float | Sequence[float],
     constraint_name: str,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
+    limits = _value_by_layer(design, min_gap_mm, "min_gap_mm")
     violations: list[Violation] = []
-    turns = tuple(_iter_indexed_turns(design))
-    for left_index, left in enumerate(turns):
-        for right in turns[left_index + 1 :]:
-            if left.layer_index != right.layer_index or left.block_index == right.block_index:
-                continue
-            if _convex_polygons_overlap(left.turn.corners, right.turn.corners):
-                continue
-            gap = _convex_polygon_distance(left.turn.corners, right.turn.corners)
-            if gap < min_gap_mm - _EPSILON:
-                violations.append(
-                    Violation(
-                        constraint_name=constraint_name,
-                        message=(
-                            f"Inter-block clearance {gap:.6g} mm is below required "
-                            f"{min_gap_mm:.6g} mm: "
-                            f"L{left.layer_index}/B{left.block_index}/T{left.turn_index} "
-                            f"with L{right.layer_index}/B{right.block_index}/T{right.turn_index}."
-                        ),
-                        severity=min_gap_mm - gap,
-                        layer_index=left.layer_index,
-                        block_index=left.block_index,
-                        turn_index=left.turn_index,
-                        other_layer_index=right.layer_index,
-                        other_block_index=right.block_index,
-                        other_turn_index=right.turn_index,
-                    )
+    for clearance in inter_block_clearances(design):
+        # Positive-area overlap belongs to check_turn_non_intersection and is
+        # intentionally not double-reported as a gap violation.
+        if clearance.distance_mm < 0.0:
+            continue
+        limit = limits[clearance.layer_index]
+        if clearance.distance_mm < limit - tolerance_mm:
+            violations.append(
+                Violation(
+                    constraint_name=constraint_name,
+                    message=(
+                        f"Closest-point clearance {clearance.distance_mm:.6g} mm is below "
+                        f"the Layer {clearance.layer_index + 1} requirement {limit:.6g} mm: "
+                        f"L{clearance.layer_index}/B{clearance.block_index}/"
+                        f"T{clearance.turn_index} with L{clearance.layer_index}/"
+                        f"B{clearance.other_block_index}/T{clearance.other_turn_index}."
+                    ),
+                    severity=limit - clearance.distance_mm,
+                    layer_index=clearance.layer_index,
+                    block_index=clearance.block_index,
+                    turn_index=clearance.turn_index,
+                    other_layer_index=clearance.layer_index,
+                    other_block_index=clearance.other_block_index,
+                    other_turn_index=clearance.other_turn_index,
                 )
+            )
     return violations
+
+
+def first_layer_pole_turn_clearance_mm(design: DipoleDesign) -> float | None:
+    """Return Layer 1's closest insulated-cable distance to the pole axis.
+
+    DOT's pole symmetry axis is ``x=0``. If a turn polygon crosses that
+    axis, its distance is zero; otherwise the distance is the smallest
+    absolute vertex x-coordinate. The minimum is taken over Layer 1 only,
+    because that layer defines the tightest pole-turn winding radius.
+    """
+
+    if not design.layers:
+        return None
+    closest: float | None = None
+    for indexed in _iter_layer_turns(design, 0):
+        x_values = tuple(x for x, _y in indexed.turn.corners)
+        distance = (
+            0.0
+            if min(x_values) <= 0.0 <= max(x_values)
+            else min(abs(x) for x in x_values)
+        )
+        closest = distance if closest is None else min(closest, distance)
+    return closest
+
+
+def check_first_layer_pole_turn_radius(
+    design: DipoleDesign,
+    min_radius_mm: float,
+    tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
+) -> list[Violation]:
+    """Require Layer 1's closest cable point to clear the pole axis.
+
+    In DOT's straight-block 2D model this is a conservative proxy for the
+    available pole-turn bend radius; an actual centerline curvature radius
+    requires a coil-end/curved-path model outside DOT's present scope.
+    """
+
+    if not math.isfinite(min_radius_mm) or min_radius_mm < 0.0:
+        raise ValueError("min_radius_mm must be finite and non-negative")
+    if not design.layers:
+        return []
+    closest: tuple[float, _IndexedTurn] | None = None
+    for indexed in _iter_layer_turns(design, 0):
+        x_values = tuple(x for x, _y in indexed.turn.corners)
+        distance = (
+            0.0
+            if min(x_values) <= 0.0 <= max(x_values)
+            else min(abs(x) for x in x_values)
+        )
+        if closest is None or distance < closest[0]:
+            closest = (distance, indexed)
+    if closest is None or closest[0] >= min_radius_mm - tolerance_mm:
+        return []
+    distance, indexed = closest
+    return [
+        Violation(
+            constraint_name="first_layer_pole_turn_radius",
+            message=(
+                f"Layer 1 pole-turn closest-point distance {distance:.6g} mm is below "
+                f"the required radius proxy {min_radius_mm:.6g} mm."
+            ),
+            severity=min_radius_mm - distance,
+            layer_index=0,
+            block_index=indexed.block_index,
+            turn_index=indexed.turn_index,
+        )
+    ]
+
+
+def inter_block_clearances(design: DipoleDesign) -> tuple[InterBlockClearance, ...]:
+    """Measure the closest turn-polygon distance for every same-layer block pair."""
+
+    clearances: list[InterBlockClearance] = []
+    for layer_index, layer in enumerate(design.layers):
+        turns_by_block = [tuple(block.turns()) for block in layer.blocks]
+        for block_index, left_turns in enumerate(turns_by_block):
+            for other_block_index in range(block_index + 1, len(turns_by_block)):
+                right_turns = turns_by_block[other_block_index]
+                closest: tuple[float, int, int] | None = None
+                for turn_index, left in enumerate(left_turns):
+                    for other_turn_index, right in enumerate(right_turns):
+                        if _convex_polygons_overlap(left.corners, right.corners):
+                            distance = -_convex_polygon_overlap_depth(
+                                left.corners, right.corners
+                            )
+                        else:
+                            distance = _convex_polygon_distance(left.corners, right.corners)
+                        if closest is None or distance < closest[0]:
+                            closest = (distance, turn_index, other_turn_index)
+                if closest is not None:
+                    distance, turn_index, other_turn_index = closest
+                    clearances.append(
+                        InterBlockClearance(
+                            layer_index=layer_index,
+                            block_index=block_index,
+                            other_block_index=other_block_index,
+                            turn_index=turn_index,
+                            other_turn_index=other_turn_index,
+                            distance_mm=distance,
+                        )
+                    )
+    return tuple(clearances)
 
 
 def check_pole_angle_limit(
     design: DipoleDesign,
     max_angle_deg: float | Sequence[float],
 ) -> list[Violation]:
-    """Check no turn vertex winds closer to the pole than the configured margin.
+    """Legacy pole-edge limit in the native ROXIE phi convention.
 
-    ``max_angle_deg`` is dipole_designer's C17 pole-edge angle limit,
-    expressed in *dd's* phi convention (angle from the midplane, capped at
-    e.g. 80deg for layer 1 -- i.e. no conductor may wind closer than
-    ``90 - max_angle_deg`` degrees from the true pole). DOT's own phi
-    convention is the complement (angle from the pole, via
-    ``_angle_from_y_axis_deg``), so the corresponding DOT-side requirement
-    is a *minimum* angle-from-pole of ``90 - max_angle_deg`` for every
-    vertex -- not a maximum, which is what this function checked before
-    (confirmed backwards: the real, ROXIE-verified CTH-14T design's own
-    midplane block naturally reaches ~89.8deg from the pole, which the old
-    "maximum" formulation would incorrectly reject at any limit below 90;
-    the corrected minimum-margin-from-pole formulation correctly accepts
-    it, since CTH-14T's actual closest-to-pole vertex is ~15.19deg, well
-    clear of the required 90-80=10deg minimum).
+    New campaigns use :func:`check_first_layer_pole_turn_radius` instead.
+    This compatibility check simply requires every conductor vertex to stay
+    below ``max_angle_deg`` measured from the midplane toward the pole.
     """
 
     limits = _max_angle_by_layer(design, max_angle_deg)
     violations: list[Violation] = []
     for indexed in _iter_indexed_turns(design):
         layer_limit = limits[indexed.layer_index]
-        required_min_angle = 90.0 - layer_limit
-        min_vertex_angle = min(_angle_from_y_axis_deg(point) for point in indexed.turn.corners)
-        if min_vertex_angle < required_min_angle - _EPSILON:
+        max_vertex_angle = max(
+            _angle_from_midplane_deg(point) for point in indexed.turn.corners
+        )
+        if max_vertex_angle > layer_limit + _EPSILON:
             violations.append(
                 Violation(
                     constraint_name="pole_angle_limit",
                     message=(
-                        f"Turn vertex angle {min_vertex_angle:.6g} deg from the pole is "
-                        f"below the required minimum {required_min_angle:.6g} deg "
-                        f"(pole-edge limit {layer_limit:.6g} deg)."
+                        f"Turn vertex angle {max_vertex_angle:.6g} deg from the midplane "
+                        f"exceeds the pole-edge limit {layer_limit:.6g} deg."
                     ),
-                    severity=required_min_angle - min_vertex_angle,
+                    severity=max_vertex_angle - layer_limit,
                     layer_index=indexed.layer_index,
                     block_index=indexed.block_index,
                     turn_index=indexed.turn_index,
@@ -410,26 +665,54 @@ def check_feasibility(
     *,
     aperture_radius_mm: float,
     min_gap_mm: float,
-    max_angle_deg: float | Sequence[float],
+    max_angle_deg: float | Sequence[float] | None = None,
     min_layer_clearance_mm: float = 0.1,
     min_pole_gap_mm: float | None = None,
-    min_inter_block_gap_mm: float | None = None,
+    min_pole_turn_radius_mm: float | None = None,
+    min_inter_block_gap_mm: float | Sequence[float] | None = None,
     enforce_layer_nesting: bool = False,
+    geometry_tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> FeasibilityResult:
     """Run all geometry feasibility constraints and aggregate violations."""
 
     violations: list[Violation] = []
-    violations.extend(check_aperture_clearance(design, aperture_radius_mm))
-    violations.extend(check_inter_layer_spacing(design, min_layer_clearance_mm))
-    violations.extend(check_midplane_clearance(design, min_gap_mm))
+    if geometry_tolerance_mm < 0.0 or not math.isfinite(geometry_tolerance_mm):
+        raise ValueError("geometry_tolerance_mm must be finite and non-negative")
+    violations.extend(
+        check_aperture_clearance(design, aperture_radius_mm, geometry_tolerance_mm)
+    )
+    violations.extend(
+        check_inter_layer_spacing(
+            design, min_layer_clearance_mm, geometry_tolerance_mm
+        )
+    )
+    violations.extend(check_midplane_clearance(design, min_gap_mm, geometry_tolerance_mm))
     if min_pole_gap_mm is not None:
-        violations.extend(check_pole_clearance(design, min_pole_gap_mm))
-    violations.extend(check_turn_non_intersection(design))
+        violations.extend(
+            check_pole_clearance(design, min_pole_gap_mm, geometry_tolerance_mm)
+        )
+    if min_pole_turn_radius_mm is not None:
+        violations.extend(
+            check_first_layer_pole_turn_radius(
+                design,
+                min_pole_turn_radius_mm,
+                geometry_tolerance_mm,
+            )
+        )
+    violations.extend(check_turn_non_intersection(design, geometry_tolerance_mm))
     if min_inter_block_gap_mm is not None:
-        violations.extend(check_inter_block_gap(design, min_inter_block_gap_mm))
+        violations.extend(
+            check_inter_block_gap(
+                design, min_inter_block_gap_mm, geometry_tolerance_mm
+            )
+        )
     if enforce_layer_nesting:
         violations.extend(check_layer_nesting(design))
-    violations.extend(check_pole_angle_limit(design, max_angle_deg))
+        violations.extend(check_extended_lower_edge_nesting(design))
+    if max_angle_deg is not None:
+        # Legacy compatibility only. New user workflows use the physical
+        # first-layer pole-turn radius proxy above instead of an angle limit.
+        violations.extend(check_pole_angle_limit(design, max_angle_deg))
     return FeasibilityResult(is_feasible=not violations, violations=tuple(violations))
 
 
@@ -463,6 +746,25 @@ def _max_angle_by_layer(
     return limits
 
 
+def _value_by_layer(
+    design: DipoleDesign,
+    value: float | Sequence[float],
+    name: str,
+) -> tuple[float, ...]:
+    if isinstance(value, Real):
+        values = tuple(float(value) for _ in design.layers)
+    else:
+        values = tuple(float(item) for item in value)
+        if len(values) != len(design.layers):
+            raise ValueError(
+                f"{name} sequence length must equal the number of design layers "
+                f"({len(values)} != {len(design.layers)})"
+            )
+    if any(not math.isfinite(item) or item < 0.0 for item in values):
+        raise ValueError(f"{name} values must be finite and non-negative")
+    return values
+
+
 def _distance_origin_to_polygon(points: tuple[Point, ...]) -> float:
     origin = (0.0, 0.0)
     if _point_in_convex_polygon(origin, points):
@@ -485,54 +787,6 @@ def _distance_point_to_segment(point: Point, start: Point, end: Point) -> float:
 
 def _max_vertex_radius(points: tuple[Point, ...]) -> float:
     return max(math.hypot(x, y) for x, y in points)
-
-
-def _convex_polygons_overlap(left: tuple[Point, ...], right: tuple[Point, ...]) -> bool:
-    for axis in (*_edge_normals(left), *_edge_normals(right)):
-        left_min, left_max = _project_onto_axis(left, axis)
-        right_min, right_max = _project_onto_axis(right, axis)
-        if min(left_max, right_max) - max(left_min, right_min) <= _EPSILON:
-            return False
-    return True
-
-
-def _convex_polygon_overlap_depth(left: tuple[Point, ...], right: tuple[Point, ...]) -> float:
-    depths = []
-    for axis in (*_edge_normals(left), *_edge_normals(right)):
-        left_min, left_max = _project_onto_axis(left, axis)
-        right_min, right_max = _project_onto_axis(right, axis)
-        depths.append(min(left_max, right_max) - max(left_min, right_min))
-    return max(0.0, min(depths)) if depths else 0.0
-
-
-def _convex_polygon_distance(left: tuple[Point, ...], right: tuple[Point, ...]) -> float:
-    """Minimum distance between two disjoint (non-overlapping) convex polygons."""
-
-    candidates = [
-        _distance_point_to_segment(vertex, start, end)
-        for vertex in left
-        for start, end in _edges(right)
-    ]
-    candidates.extend(
-        _distance_point_to_segment(vertex, start, end)
-        for vertex in right
-        for start, end in _edges(left)
-    )
-    return min(candidates)
-
-
-def _edge_normals(points: tuple[Point, ...]) -> Iterator[Point]:
-    for start, end in _edges(points):
-        edge = (end[0] - start[0], end[1] - start[1])
-        normal = (-edge[1], edge[0])
-        length = math.hypot(*normal)
-        if length > _EPSILON:
-            yield (normal[0] / length, normal[1] / length)
-
-
-def _project_onto_axis(points: tuple[Point, ...], axis: Point) -> tuple[float, float]:
-    projections = tuple(point[0] * axis[0] + point[1] * axis[1] for point in points)
-    return min(projections), max(projections)
 
 
 def _signed_half_plane_value(p1: Point, p2: Point, q: Point) -> float:
@@ -559,5 +813,5 @@ def _edges(points: tuple[Point, ...]) -> Iterator[tuple[Point, Point]]:
     yield from zip(points, (*points[1:], points[0]), strict=True)
 
 
-def _angle_from_y_axis_deg(point: Point) -> float:
-    return abs(math.degrees(math.atan2(point[0], point[1])))
+def _angle_from_midplane_deg(point: Point) -> float:
+    return abs(math.degrees(math.atan2(point[1], point[0])))

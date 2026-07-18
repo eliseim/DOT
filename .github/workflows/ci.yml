@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m pytest -q -m "not slow and not live_roxie"
+      - run: dot validate benchmarks/lhc_mb_no_iron/blind_target.json
+      - run: dot validate benchmarks/cth14t_no_iron/blind_target.json
+      - run: dot validate benchmarks/falcond_no_iron/blind_target.json

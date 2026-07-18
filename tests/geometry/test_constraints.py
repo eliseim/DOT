@@ -7,25 +7,29 @@ import pytest
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer, TurnPolygon
 from dot.geometry.constraints import (
     check_aperture_clearance,
+    check_extended_lower_edge_nesting,
     check_feasibility,
+    check_first_layer_pole_turn_radius,
     check_inter_block_gap,
     check_inter_layer_spacing,
+    inter_block_clearances,
     check_layer_nesting,
     check_midplane_clearance,
     check_pole_angle_limit,
     check_pole_clearance,
     check_turn_non_intersection,
+    first_layer_pole_turn_clearance_mm,
 )
 
 
 def test_aperture_clearance_accepts_turn_outside_aperture() -> None:
-    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=20.0)
+    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=70.0)
 
     assert check_aperture_clearance(design, aperture_radius_mm=8.0) == []
 
 
 def test_aperture_clearance_rejects_turn_inside_aperture() -> None:
-    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=20.0)
+    design = _single_turn_design(inner_radius_mm=10.0, phi_deg=70.0)
 
     violations = check_aperture_clearance(design, aperture_radius_mm=10.5)
 
@@ -41,8 +45,8 @@ def test_inter_layer_spacing_accepts_radially_separated_layers() -> None:
     design = DipoleDesign(
         aperture_radius_mm=8.0,
         layers=(
-            _layer(inner_radius_mm=10.0, phi_deg=0.0, cable=cable),
-            _layer(inner_radius_mm=13.0, phi_deg=0.0, cable=cable),
+            _layer(inner_radius_mm=10.0, phi_deg=90.0, cable=cable),
+            _layer(inner_radius_mm=13.0, phi_deg=90.0, cable=cable),
         ),
     )
 
@@ -54,8 +58,8 @@ def test_inter_layer_spacing_rejects_radially_overlapping_layers() -> None:
     design = DipoleDesign(
         aperture_radius_mm=8.0,
         layers=(
-            _layer(inner_radius_mm=10.0, phi_deg=0.0, cable=cable),
-            _layer(inner_radius_mm=12.0, phi_deg=0.0, cable=cable),
+            _layer(inner_radius_mm=10.0, phi_deg=90.0, cable=cable),
+            _layer(inner_radius_mm=12.0, phi_deg=90.0, cable=cable),
         ),
     )
 
@@ -63,10 +67,10 @@ def test_inter_layer_spacing_rejects_radially_overlapping_layers() -> None:
 
     assert [violation.constraint_name for violation in violations] == ["inter_layer_spacing"]
     assert violations[0].layer_index == 1
-    assert violations[0].severity == pytest.approx(0.28033988749894867)
+    assert violations[0].severity == pytest.approx(0.1)
 
 
-def test_check_feasibility_rejects_inter_layer_overlap_across_empty_layer() -> None:
+def test_check_feasibility_does_not_compare_layer_global_radial_extrema() -> None:
     inner_turn = TurnPolygon(
         corners=((-1.0, 10.0), (1.0, 10.0), (1.0, 12.0), (-1.0, 12.0)),
         current_a=1000.0,
@@ -93,10 +97,8 @@ def test_check_feasibility_rejects_inter_layer_overlap_across_empty_layer() -> N
     )
 
     assert result.is_feasible is False
-    assert any(
+    assert not any(
         violation.constraint_name == "inter_layer_spacing"
-        and violation.layer_index == 2
-        and violation.other_layer_index == 0
         for violation in result.violations
     )
     assert not any(
@@ -107,7 +109,7 @@ def test_check_feasibility_rejects_inter_layer_overlap_across_empty_layer() -> N
 
 def test_midplane_clearance_accepts_hand_computed_gap() -> None:
     design = _midplane_reference_design()
-    hand_computed_lowest_y_mm = 10.0 * math.cos(math.radians(60.0)) - 4.0 / 2.0
+    hand_computed_lowest_y_mm = 10.0 * math.sin(math.radians(30.0)) - 4.0 / 2.0
 
     assert hand_computed_lowest_y_mm == pytest.approx(3.0, rel=0.0, abs=1.0e-12)
     assert check_midplane_clearance(design, min_gap_mm=3.0) == []
@@ -130,8 +132,8 @@ def test_pole_clearance_accepts_hand_computed_gap() -> None:
     # alpha=0 fixes the width axis along global Y (not X, see primitives.py's
     # absolute-alpha convention), so the cable width offset does not move
     # any corner's x-coordinate here -- min_x is exactly the anchor's own
-    # x = r*sin(phi_deg).
-    hand_computed_lowest_x_mm = 10.0 * math.sin(math.radians(30.0))
+    # x = r*cos(phi_deg).
+    hand_computed_lowest_x_mm = 10.0 * math.cos(math.radians(60.0))
 
     assert hand_computed_lowest_x_mm == pytest.approx(5.0, rel=0.0, abs=1.0e-12)
     assert check_pole_clearance(design, min_gap_mm=5.0) == []
@@ -176,6 +178,48 @@ def test_feasibility_applies_pole_clearance_when_configured() -> None:
     assert any(v.constraint_name == "pole_clearance" for v in result.violations)
 
 
+def test_first_layer_pole_turn_radius_uses_exact_closest_point() -> None:
+    design = _pole_reference_design()
+
+    assert first_layer_pole_turn_clearance_mm(design) == pytest.approx(5.0)
+    assert check_first_layer_pole_turn_radius(design, min_radius_mm=5.0) == []
+
+    violations = check_first_layer_pole_turn_radius(design, min_radius_mm=5.3)
+    assert [row.constraint_name for row in violations] == [
+        "first_layer_pole_turn_radius"
+    ]
+    assert violations[0].layer_index == 0
+    assert violations[0].severity == pytest.approx(0.3)
+
+
+def test_first_layer_pole_turn_radius_ignores_closer_outer_layer() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    design = DipoleDesign(
+        aperture_radius_mm=1.0,
+        layers=(
+            _layer(inner_radius_mm=20.0, phi_deg=60.0, cable=cable),
+            _layer(inner_radius_mm=2.0, phi_deg=85.0, cable=cable),
+        ),
+    )
+
+    assert check_first_layer_pole_turn_radius(design, min_radius_mm=9.0) == []
+
+
+def test_feasibility_replaces_user_pole_angle_with_first_layer_radius() -> None:
+    result = check_feasibility(
+        _pole_reference_design(),
+        aperture_radius_mm=1.0,
+        min_gap_mm=0.0,
+        min_pole_turn_radius_mm=5.3,
+    )
+
+    assert any(
+        row.constraint_name == "first_layer_pole_turn_radius"
+        for row in result.violations
+    )
+    assert not any(row.constraint_name == "pole_angle_limit" for row in result.violations)
+
+
 def test_inter_block_gap_accepts_hand_computed_gap() -> None:
     design = _two_block_reference_design()
 
@@ -192,6 +236,40 @@ def test_inter_block_gap_rejects_hand_computed_gap() -> None:
     assert violations[0].block_index == 0
     assert violations[0].other_block_index == 1
     assert violations[0].severity == pytest.approx(0.144247806, rel=0.0, abs=1.0e-6)
+
+
+def test_inter_block_clearance_reports_exact_closest_turn_pair() -> None:
+    rows = inter_block_clearances(_two_block_reference_design())
+
+    assert len(rows) == 1
+    assert rows[0].layer_index == 0
+    assert rows[0].block_index == 0
+    assert rows[0].other_block_index == 1
+    assert rows[0].turn_index == 0
+    assert rows[0].other_turn_index == 0
+    assert rows[0].distance_mm == pytest.approx(0.855752194, abs=1.0e-9)
+
+
+def test_inter_block_gap_accepts_independent_per_layer_requirements() -> None:
+    one_layer = _two_block_reference_design()
+    design = DipoleDesign(
+        aperture_radius_mm=one_layer.aperture_radius_mm,
+        layers=(one_layer.layers[0], one_layer.layers[0]),
+    )
+
+    violations = check_inter_block_gap(design, min_gap_mm=(0.8, 1.0))
+
+    assert len(violations) == 1
+    assert violations[0].layer_index == 1
+    assert violations[0].severity == pytest.approx(0.144247806, abs=1.0e-9)
+
+
+def test_inter_block_gap_rejects_wrong_number_of_layer_requirements() -> None:
+    with pytest.raises(ValueError, match="sequence length"):
+        check_inter_block_gap(
+            _two_block_reference_design(),
+            min_gap_mm=(0.1, 0.2),
+        )
 
 
 def test_inter_block_gap_ignores_turns_from_same_block() -> None:
@@ -237,8 +315,8 @@ def test_feasibility_applies_inter_block_gap_when_configured() -> None:
 
 def test_layer_nesting_rejects_pole_ward_outer_layer_vertex() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
-    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
-    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    inner_block = Block(phi_deg=60.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=85.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
     design = DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(
@@ -254,10 +332,37 @@ def test_layer_nesting_rejects_pole_ward_outer_layer_vertex() -> None:
     assert all(v.layer_index == 1 and v.other_layer_index == 0 for v in violations)
 
 
+def test_extended_lower_edge_nesting_is_stricter_than_pole_side_nesting() -> None:
+    inner_turn = TurnPolygon(
+        corners=((2.0, 4.0), (2.0, 6.0), (8.0, 6.0), (8.0, 4.0)),
+        current_a=1.0,
+    )
+    outer_turn = TurnPolygon(
+        corners=((9.0, 3.0), (9.0, 5.0), (12.0, 5.0), (12.0, 3.0)),
+        current_a=1.0,
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=1.0,
+        layers=(
+            Layer(inner_radius_mm=2.0, blocks=(_FixedTurnBlock(inner_turn),)),
+            Layer(inner_radius_mm=9.0, blocks=(_FixedTurnBlock(outer_turn),)),
+        ),
+    )
+
+    assert check_layer_nesting(design) == []
+    violations = check_extended_lower_edge_nesting(design)
+
+    assert violations
+    assert {item.constraint_name for item in violations} == {
+        "extended_lower_edge_nesting"
+    }
+    assert max(item.severity for item in violations) == pytest.approx(1.0)
+
+
 def test_feasibility_skips_layer_nesting_when_not_enforced() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
-    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
-    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    inner_block = Block(phi_deg=60.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=85.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
     design = DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(
@@ -273,8 +378,8 @@ def test_feasibility_skips_layer_nesting_when_not_enforced() -> None:
 
 def test_feasibility_applies_layer_nesting_when_enforced() -> None:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
-    inner_block = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
-    outer_block = Block(phi_deg=5.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    inner_block = Block(phi_deg=60.0, alpha_deg=0.0, n_turns=3, cable=cable, inner_radius_mm=10.0, current_a=1.0)
+    outer_block = Block(phi_deg=85.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
     design = DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(
@@ -348,25 +453,20 @@ def test_turn_non_intersection_rejects_positive_area_polygon_overlap() -> None:
 
 
 def test_pole_angle_limit_accepts_vertex_safely_clear_of_pole() -> None:
-    # DOT's phi convention: 0=pole, 90=midplane. max_angle_deg is dd's C17
-    # pole-edge limit (angle from midplane) -- the DOT-side requirement is
-    # a *minimum* angle-from-pole of 90-max_angle_deg. A turn whose
-    # nearest-to-pole vertex is at 60deg clears a 40deg minimum
-    # (max_angle_deg=50).
+    # Native ROXIE phi is measured from the midplane toward the pole.
     design = DipoleDesign(
         aperture_radius_mm=8.0,
-        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(62.0)),)),),
+        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(48.0)),)),),
     )
 
     assert check_pole_angle_limit(design, max_angle_deg=50.0) == []
 
 
 def test_pole_angle_limit_rejects_vertex_too_close_to_pole() -> None:
-    # Nearest-to-pole vertex at 8deg does not clear the required 10deg
-    # minimum (max_angle_deg=80, matching the CTH layer-1 spec value).
+    # A vertex at 82deg exceeds the legacy 80deg pole-edge limit.
     design = DipoleDesign(
         aperture_radius_mm=8.0,
-        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(10.0)),)),),
+        layers=(Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(82.0)),)),),
     )
 
     violations = check_pole_angle_limit(design, max_angle_deg=80.0)
@@ -382,17 +482,15 @@ def test_pole_angle_limit_applies_per_layer_limits() -> None:
     design = DipoleDesign(
         aperture_radius_mm=8.0,
         layers=(
-            Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(10.0)),)),
-            Layer(inner_radius_mm=14.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(50.0)),)),
+            Layer(inner_radius_mm=10.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(82.0)),)),
+            Layer(inner_radius_mm=14.0, blocks=(_FixedTurnBlock(_turn_with_outer_angle(40.0)),)),
         ),
     )
 
-    # Layer 0's nearest-to-pole vertex (8deg) clears a lenient 5deg
-    # minimum (max_angle_deg=85); layer 1's (48deg) clears it easily too.
+    # Both layer maxima lie below the common 85deg limit.
     assert check_pole_angle_limit(design, max_angle_deg=85.0) == []
 
-    # Layer 0's required minimum becomes 90-80=10deg -- its 8deg vertex
-    # violates; layer 1's required minimum stays 90-85=5deg -- still fine.
+    # Layer 0 exceeds 80deg while layer 1 stays below 85deg.
     violations = check_pole_angle_limit(design, max_angle_deg=(80.0, 85.0))
 
     assert [violation.constraint_name for violation in violations] == ["pole_angle_limit"]
@@ -405,7 +503,7 @@ def test_pole_angle_limit_rejects_per_layer_length_mismatch() -> None:
 
 
 def test_check_feasibility_accepts_valid_hand_constructed_design() -> None:
-    # max_angle_deg=90 is a no-op for the (corrected, minimum-from-pole)
+    # max_angle_deg=90 is a no-op for the legacy pole-angle
     # pole_angle_limit check -- this test exercises the other constraints,
     # not pole-angle specifically.
     result = check_feasibility(
@@ -478,7 +576,7 @@ def _midplane_reference_design() -> DipoleDesign:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return DipoleDesign(
         aperture_radius_mm=6.0,
-        layers=(_layer(inner_radius_mm=10.0, phi_deg=60.0, cable=cable),),
+        layers=(_layer(inner_radius_mm=10.0, phi_deg=30.0, cable=cable),),
     )
 
 
@@ -486,14 +584,14 @@ def _pole_reference_design() -> DipoleDesign:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
     return DipoleDesign(
         aperture_radius_mm=6.0,
-        layers=(_layer(inner_radius_mm=10.0, phi_deg=30.0, cable=cable),),
+        layers=(_layer(inner_radius_mm=10.0, phi_deg=60.0, cable=cable),),
     )
 
 
 def _two_block_reference_design() -> DipoleDesign:
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
-    first = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
-    second = Block(phi_deg=40.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    first = Block(phi_deg=50.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    second = Block(phi_deg=60.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
     return DipoleDesign(
         aperture_radius_mm=6.0,
         layers=(Layer(inner_radius_mm=20.0, blocks=(first, second)),),
@@ -503,7 +601,7 @@ def _two_block_reference_design() -> DipoleDesign:
 def _valid_two_layer_design() -> DipoleDesign:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     first = Block(
-        phi_deg=20.0,
+        phi_deg=70.0,
         alpha_deg=0.0,
         n_turns=2,
         cable=cable,
@@ -514,7 +612,7 @@ def _valid_two_layer_design() -> DipoleDesign:
         aperture_radius_mm=8.0,
         layers=(
             Layer(inner_radius_mm=10.0, blocks=(first,)),
-            _layer(inner_radius_mm=15.0, phi_deg=20.0, cable=cable),
+            _layer(inner_radius_mm=15.0, phi_deg=70.0, cable=cable),
         ),
     )
 
@@ -549,7 +647,7 @@ def _turn_with_outer_angle(angle_deg: float) -> TurnPolygon:
 
 def _point_at_angle(angle_deg: float, radius_mm: float) -> tuple[float, float]:
     angle_rad = math.radians(angle_deg)
-    return (radius_mm * math.sin(angle_rad), radius_mm * math.cos(angle_rad))
+    return (radius_mm * math.cos(angle_rad), radius_mm * math.sin(angle_rad))
 
 
 def test_sat_overlap_test_uses_finite_polygons_not_radius_envelopes() -> None:

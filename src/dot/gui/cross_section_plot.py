@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Polygon
 
@@ -48,10 +49,23 @@ def cross_section_figure(design: DipoleDesign) -> Figure:
 
     figure = Figure(figsize=(6.0, 6.0), dpi=100)
     axes = figure.add_subplot(111)
+    draw_cross_section(axes, design)
+    figure.tight_layout()
+    return figure
+
+
+def draw_cross_section(
+    axes: Axes,
+    design: DipoleDesign,
+    *,
+    title: str = "Dipole cross-section",
+) -> None:
+    """Draw a full mirrored coil into an existing Matplotlib axes."""
+
     axes.set_aspect("equal", adjustable="box")
     axes.set_xlabel("x [mm]")
     axes.set_ylabel("y [mm]")
-    axes.set_title("Dipole cross-section")
+    axes.set_title(title)
 
     aperture = Circle(
         (0.0, 0.0),
@@ -80,8 +94,6 @@ def cross_section_figure(design: DipoleDesign) -> Figure:
     axes.set_xlim(-extent, extent)
     axes.set_ylim(-extent, extent)
     axes.grid(True, color="#e5e7eb", linewidth=0.6)
-    figure.tight_layout()
-    return figure
 
 
 def plot_cross_section(design: DipoleDesign) -> Figure:

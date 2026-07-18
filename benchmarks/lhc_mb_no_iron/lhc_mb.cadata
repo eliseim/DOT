@@ -1,0 +1,23 @@
+VERSION 11
+INSUL 2
+  1 ALLPOLYOL         0.15         0.13 'POLYIMIDE MB OUTER'
+  2 ALLPOLYIL        0.145        0.145 'POLYIMIDE MB INNER'
+
+REMFIT 1
+  1 FIT1   1           3E+09          9.2         0.57          0.9         2.32        27.04         14.5            0            0            0            0 'LHC NBTI'
+
+FILAMENT 2
+  1 NBTIO                6            0 FIT1   FIT1   'NBTI OUTER CABLE'
+  2 NBTII                7            0 FIT1   FIT1   'NBTI INNER CABLE'
+
+STRAND 2
+  1 STR01            1.065          1.6    70          1.9           10       1433.3       500.34 'MB INNER'
+  2 STR02            0.825          1.9    80          1.9            9         1953       550.03 'MB OUTER'
+
+CABLE 2
+  1 CABLE02           15.1        1.362        1.598    36          100            5 'MB OUTER LAYER'
+  2 CABLE01           15.1        1.736        2.064    28          115            5 'MB INNER LAYER'
+
+CONDUCTOR 2
+  1 YELLONOU      1 CABLE02 STR02 NBTIO ALLPOLYOL TRANS1 NBTILHC 1.9 'LHC MB OUTER'
+  2 YELLONIN      1 CABLE01 STR01 NBTII ALLPOLYIL TRANS1 NBTILHC 1.9 'LHC MB INNER'

@@ -20,10 +20,12 @@ class OperatingPoint:
 
 
 def operating_point(unit_current_design: DipoleDesign, target_bore_field_t: float) -> OperatingPoint:
-    """Scale all block currents once to hit the requested center ``By`` field.
+    """Scale a uniform-series-current design to the requested center ``By``.
 
     With no iron, the field is exactly linear in current by superposition, so
-    ``target_bore_field_t / By(1 A)`` is the exact scale factor.
+    ``target_bore_field_t / By(input current)`` is the exact scale factor.
+    Unit-current decoded designs remain the usual input, but already-scaled
+    already-scaled candidates are supported without losing their actual current.
     """
 
     if not math.isfinite(target_bore_field_t):
@@ -37,11 +39,24 @@ def operating_point(unit_current_design: DipoleDesign, target_bore_field_t: floa
     if by_t == 0.0 or not math.isfinite(by_t):
         raise ValueError("unit-current bore field must be finite and nonzero")
     scale_factor = target_bore_field_t / by_t
+    block_currents = [
+        block.current_a
+        for layer in unit_current_design.layers
+        for block in layer.blocks
+    ]
+    if not block_currents:
+        raise ValueError("design must contain at least one block")
+    reference_current = block_currents[0]
+    if any(
+        not math.isclose(current, reference_current, rel_tol=1.0e-10, abs_tol=1.0e-10)
+        for current in block_currents[1:]
+    ):
+        raise ValueError("all blocks must carry the same series current")
     scaled_design = scale_design_currents(unit_current_design, scale_factor)
     return OperatingPoint(
         unit_bore_field_t=by_t,
         scale_factor=scale_factor,
-        operating_current_a=scale_factor,
+        operating_current_a=reference_current * scale_factor,
         design=scaled_design,
     )
 

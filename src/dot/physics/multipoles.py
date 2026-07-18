@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
-from .field import MM_TO_M, MU0_OVER_2PI, dipole_mirror_sources
+from .field import MM_TO_M, MU0_OVER_2PI
 from .sources import LineCurrentSource
 
 
@@ -58,20 +58,24 @@ def _absolute_coefficients(
     r_ref_m = r_ref_mm * MM_TO_M
     coefficients: list[complex] = []
     for harmonic in range(1, order + 1):
-        real_terms: list[float] = []
-        imag_terms: list[float] = []
-        for compact_source in sources:
-            for source in dipole_mirror_sources(compact_source):
-                z0_m = complex(source.x_mm * MM_TO_M, source.y_mm * MM_TO_M)
-                term = (
-                    -MU0_OVER_2PI
-                    * source.current_a
-                    * (r_ref_m ** (harmonic - 1))
-                    / (z0_m**harmonic)
-                )
-                real_terms.append(term.real)
-                imag_terms.append(term.imag)
-        coefficients.append(complex(math.fsum(real_terms), math.fsum(imag_terms)))
+        # The four-image normal-dipole orbit makes every even and every skew
+        # coefficient cancel analytically. For odd n its sum is exactly four
+        # times the real part of the compact first-quadrant contribution.
+        # Exploiting that identity avoids allocating 4 * sources * orders
+        # temporary LineCurrentSource objects while retaining math.fsum's
+        # stable accumulation for the physically non-zero terms.
+        if harmonic % 2 == 0:
+            coefficients.append(0.0j)
+            continue
+        scale = -4.0 * MU0_OVER_2PI * (r_ref_m ** (harmonic - 1))
+        normal = math.fsum(
+            (
+                source.current_a
+                / complex(source.x_mm * MM_TO_M, source.y_mm * MM_TO_M) ** harmonic
+            ).real
+            for source in sources
+        )
+        coefficients.append(complex(scale * normal, 0.0))
     return tuple(coefficients)
 
 

@@ -23,5 +23,18 @@ htmlcov/
 # coordinator scratch/exploratory scripts, never part of the package
 .tmp_scratch/
 
+# local campaign outputs and verification artefacts
+campaigns/
+verification_runs/
+tmp/
+
+# licensed/reference documents used during local physics review
+*.pdf
+magnet_design_course_gupta/
+best_candidate_problems.png
+
+# local AI-orchestration follow-up notes are not public documentation
+docs/ai/**/CODEX_FOLLOWUP.md
+
 # local Claude Code session state, not project content
 .claude/

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 
 import numpy as np
 from pymoo.core.problem import Problem
@@ -13,7 +16,14 @@ from dot.geometry.constraints import check_feasibility
 
 from . import objectives as _objectives_module
 from .genome import Topology, decode, flatten_mixed_genome, genome_bounds, mixed_variable_spec
-from .objectives import LayerConductorData, field_quality_objective, load_line_margin_objective
+from .objectives import (
+    CERTIFICATION_FIDELITY,
+    SEARCH_FIDELITY,
+    EvaluationFidelity,
+    LayerConductorData,
+    field_quality_objective,
+    load_line_margin_objective,
+)
 from .operating_point import operating_point
 from .topology_survival import topology_family
 
@@ -89,10 +99,30 @@ class AdmissionSchedule:
 # already anneals but dd doesn't stage the same way.
 DEFAULT_ADMISSION_SCHEDULE = AdmissionSchedule(
     stages=(
-        AdmissionStage(end_fraction=0.4, harmonic_multiplier=4.0, margin_relaxation_percent=10.0, current_multiplier=1.5),
-        AdmissionStage(end_fraction=0.7, harmonic_multiplier=2.0, margin_relaxation_percent=5.0, current_multiplier=1.2),
-        AdmissionStage(end_fraction=0.9, harmonic_multiplier=1.0, margin_relaxation_percent=2.0, current_multiplier=1.0),
-        AdmissionStage(end_fraction=1.0, harmonic_multiplier=1.0, margin_relaxation_percent=0.0, current_multiplier=1.0),
+        AdmissionStage(
+            end_fraction=0.4,
+            harmonic_multiplier=4.0,
+            margin_relaxation_percent=10.0,
+            current_multiplier=1.5,
+        ),
+        AdmissionStage(
+            end_fraction=0.7,
+            harmonic_multiplier=2.0,
+            margin_relaxation_percent=5.0,
+            current_multiplier=1.2,
+        ),
+        AdmissionStage(
+            end_fraction=0.9,
+            harmonic_multiplier=1.0,
+            margin_relaxation_percent=2.0,
+            current_multiplier=1.0,
+        ),
+        AdmissionStage(
+            end_fraction=1.0,
+            harmonic_multiplier=1.0,
+            margin_relaxation_percent=0.0,
+            current_multiplier=1.0,
+        ),
     )
 )
 
@@ -106,16 +136,36 @@ class OptimizationTargets:
     max_order: int
     cadata_by_layer: tuple[LayerConductorData | None, ...]
     temperature_k: float
+    harmonic_orders: tuple[int, ...] = ()
+    harmonic_targets: tuple[tuple[int, float], ...] = ()
+    search_fidelity: EvaluationFidelity = SEARCH_FIDELITY
+    certification_fidelity: EvaluationFidelity = CERTIFICATION_FIDELITY
     max_harmonic_units: float | None = None
     min_margin_percent: float | None = None
     max_current_a: float | None = None
     max_total_turns: int | None = None
     max_turns_per_layer: int | None = None
     excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
+    # Preserve the harmonic-margin Pareto front during evolution and enforce
+    # those two performance thresholds only in immutable final certification.
+    # max_current_a remains a hard constraint in every search mode.
+    pareto_search: bool = False
     # None (default) preserves the original single linear anneal exactly.
     # When set, admission_thresholds() uses this staged schedule instead
     # (task 0044).
     admission_schedule: AdmissionSchedule | None = None
+
+    def __post_init__(self) -> None:
+        orders = [order for order, _target in self.harmonic_targets]
+        if len(set(orders)) != len(orders):
+            raise ValueError("harmonic target orders must be unique")
+        for order, target in self.harmonic_targets:
+            if order < 2 or order > self.max_order or not math.isfinite(target):
+                raise ValueError(
+                    "harmonic targets must use valid orders and finite values"
+                )
+            if self.harmonic_orders and order not in self.harmonic_orders:
+                raise ValueError("harmonic target orders must belong to harmonic_orders")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +173,16 @@ class FeasibilitySettings:
     """Geometry feasibility settings passed through to task 0003 checks."""
 
     min_gap_mm: float
-    max_angle_deg: float | Sequence[float]
+    # Legacy angle limit retained only for loading older campaigns.
+    max_angle_deg: float | Sequence[float] | None = None
     min_layer_clearance_mm: float = 0.1
     min_pole_gap_mm: float | None = None
-    min_inter_block_gap_mm: float | None = None
+    min_pole_turn_radius_mm: float | None = None
+    # A scalar applies to every layer; a sequence sets the physical
+    # closest-point clearance independently for each layer.
+    min_inter_block_gap_mm: float | Sequence[float] | None = None
     enforce_layer_nesting: bool = False
+    geometry_tolerance_mm: float = 0.005
     # Cap, in degrees, on how far LayerNestingRepair (task 0043) may shift an
     # outer layer's blocks toward the midplane to restore C10 nesting. None
     # or <=0 disables the repair (a violation is left for the existing
@@ -154,16 +209,27 @@ class DipoleOptimizationProblem(Problem):
         self.cable_map = topology.cables if cable_map is None else cable_map
         self.total_generations = max(1, int(total_generations))
         self.current_generation = 1
+        constraint_names = ["geometry"]
+        if targets.max_total_turns is not None:
+            constraint_names.append("total_turns")
+        if targets.max_turns_per_layer is not None:
+            constraint_names.append("turns_per_layer")
+        if targets.max_harmonic_units is not None and not targets.pareto_search:
+            constraint_names.append("harmonics")
+        if targets.min_margin_percent is not None and not targets.pareto_search:
+            constraint_names.append("margin")
+        # Operating current is a hard powering/circuit constraint, not a
+        # harmonic-margin trade-off objective. Keep it active in Pareto mode
+        # so over-current designs cannot dominate the live view or consume
+        # the population merely because their harmonics are attractive.
+        if targets.max_current_a is not None:
+            constraint_names.append("current")
+        self.constraint_names = tuple(constraint_names)
         lower, upper = genome_bounds(topology)
         super().__init__(
             n_var=topology.n_var,
             n_obj=2,
-            n_ieq_constr=1
-            + int(targets.max_total_turns is not None)
-            + int(targets.max_turns_per_layer is not None)
-            + int(targets.max_harmonic_units is not None)
-            + int(targets.min_margin_percent is not None)
-            + int(targets.max_current_a is not None),
+            n_ieq_constr=len(self.constraint_names),
             xl=lower,
             xu=upper,
             vars=mixed_variable_spec(topology),
@@ -181,9 +247,16 @@ class DipoleOptimizationProblem(Problem):
         self._executor = None
         if n_workers is not None and n_workers > 1:
             import concurrent.futures
+            import multiprocessing
+
+            worker_limit = 61 if os.name == "nt" else max(2, int(n_workers))
+            worker_count = min(max(2, int(n_workers)), worker_limit)
 
             self._executor = concurrent.futures.ProcessPoolExecutor(
-                max_workers=n_workers,
+                max_workers=worker_count,
+                # Explicit spawn is safe when the GUI starts a campaign from
+                # its background thread and is consistent across platforms.
+                mp_context=multiprocessing.get_context("spawn"),
                 initializer=_init_worker,
                 initargs=(
                     topology,
@@ -215,8 +288,13 @@ class DipoleOptimizationProblem(Problem):
 
         self.current_generation = max(1, int(generation))
 
-    def admission_thresholds(self, generation: int | None = None) -> tuple[float | None, float | None, float | None]:
+    def admission_thresholds(
+        self, generation: int | None = None
+    ) -> tuple[float | None, float | None, float | None]:
         """Return active harmonic, margin, and current thresholds."""
+
+        if self.targets.pareto_search:
+            return None, None, self.targets.max_current_a
 
         if generation is None:
             generation = self.current_generation
@@ -239,7 +317,9 @@ class DipoleOptimizationProblem(Problem):
             current_threshold = start + progress * (self.targets.max_current_a - start)
         return harmonic_threshold, margin_threshold, current_threshold
 
-    def _staged_admission_thresholds(self, progress: float) -> tuple[float | None, float | None, float | None]:
+    def _staged_admission_thresholds(
+        self, progress: float
+    ) -> tuple[float | None, float | None, float | None]:
         assert self.targets.admission_schedule is not None
         stage = self.targets.admission_schedule.stage_for_progress(progress)
         harmonic_threshold = None
@@ -256,7 +336,12 @@ class DipoleOptimizationProblem(Problem):
     def _evaluate(self, x, out, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
         if isinstance(x, dict):
             rows = np.atleast_2d(flatten_mixed_genome(x, self.topology))
-        elif isinstance(x, np.ndarray) and x.dtype == object and x.size and isinstance(x.flat[0], dict):
+        elif (
+            isinstance(x, np.ndarray)
+            and x.dtype == object
+            and x.size
+            and isinstance(x.flat[0], dict)
+        ):
             rows = np.asarray(
                 [flatten_mixed_genome(row, self.topology) for row in x],
                 dtype=float,
@@ -274,11 +359,14 @@ class DipoleOptimizationProblem(Problem):
         # survival. "invalid" is the fallback for rows whose genome fails to
         # decode at all -- those never get a real fingerprint.
         families = np.full(rows.shape[0], "invalid", dtype=object)
-        harmonic_threshold_units, margin_threshold_percent, current_threshold_a = self.admission_thresholds()
+        harmonic_threshold_units, margin_threshold_percent, current_threshold_a = (
+            self.admission_thresholds()
+        )
 
         if self._executor is not None:
             tasks = [
-                (row, harmonic_threshold_units, margin_threshold_percent, current_threshold_a) for row in rows
+                (row, harmonic_threshold_units, margin_threshold_percent, current_threshold_a)
+                for row in rows
             ]
             results = list(self._executor.map(_evaluate_row_worker, tasks))
         else:
@@ -334,18 +422,33 @@ def _evaluate_row(
             max_angle_deg=feasibility.max_angle_deg,
             min_layer_clearance_mm=feasibility.min_layer_clearance_mm,
             min_pole_gap_mm=feasibility.min_pole_gap_mm,
+            min_pole_turn_radius_mm=feasibility.min_pole_turn_radius_mm,
             min_inter_block_gap_mm=feasibility.min_inter_block_gap_mm,
             enforce_layer_nesting=feasibility.enforce_layer_nesting,
+            geometry_tolerance_mm=feasibility.geometry_tolerance_mm,
         )
         if not result.is_feasible:
-            constraint[0] = sum(violation.severity for violation in result.violations)
+            constraint[0] = max(
+                _normalized_geometry_violation(
+                    violation.constraint_name,
+                    violation.severity,
+                    feasibility,
+                    layer_index=violation.layer_index,
+                )
+                for violation in result.violations
+            )
             return objective, constraint, family
 
         target_constraint_index = 1
         turn_budget_violation = False
         if targets.max_total_turns is not None:
-            total_turns = sum(block.n_turns for layer in unit_design.layers for block in layer.blocks)
-            constraint[target_constraint_index] = max(0.0, float(total_turns - targets.max_total_turns))
+            total_turns = sum(
+                block.n_turns for layer in unit_design.layers for block in layer.blocks
+            )
+            constraint[target_constraint_index] = max(
+                0.0,
+                float(total_turns - targets.max_total_turns) / max(1.0, targets.max_total_turns),
+            )
             turn_budget_violation |= constraint[target_constraint_index] > 0.0
             target_constraint_index += 1
         if targets.max_turns_per_layer is not None:
@@ -353,39 +456,125 @@ def _evaluate_row(
                 max(0, sum(block.n_turns for block in layer.blocks) - targets.max_turns_per_layer)
                 for layer in unit_design.layers
             )
-            constraint[target_constraint_index] = float(per_layer_violation)
+            constraint[target_constraint_index] = float(per_layer_violation) / max(
+                1.0, targets.max_turns_per_layer
+            )
             turn_budget_violation |= constraint[target_constraint_index] > 0.0
             target_constraint_index += 1
         if turn_budget_violation:
             return objective, constraint, family
 
         solved = operating_point(unit_design, targets.target_bore_field_t)
-        field_quality = field_quality_objective(solved.design, targets.r_ref_mm, targets.max_order)
-        margin_percent = load_line_margin_objective(
+        field_quality = field_quality_objective(
             solved.design,
-            tuple(layer.cable_id for layer in topology.layers),
-            targets.cadata_by_layer,
-            targets.temperature_k,
+            targets.r_ref_mm,
+            targets.max_order,
+            normal_orders=targets.harmonic_orders or None,
+            normal_targets=dict(targets.harmonic_targets),
+            include_skew=not bool(targets.harmonic_orders),
+            fidelity=targets.search_fidelity,
         )
-        objective = (field_quality, -margin_percent)
+        objective = (field_quality, _PENALTY)
         if harmonic_threshold_units is not None:
             # field_quality_objective's raw return value is already in
             # CERN/European relative "units" (parts per 1e4 of the main
             # dipole term) -- see multipole_coefficients' own docstring
             # ("multiplied by 1e4... b_1 is 10000 for a normal dipole").
             # No conversion needed: compare directly (task 0041).
-            constraint[target_constraint_index] = max(0.0, field_quality - harmonic_threshold_units)
+            constraint[target_constraint_index] = max(
+                0.0,
+                (field_quality - harmonic_threshold_units)
+                / max(1.0, abs(harmonic_threshold_units)),
+            )
             target_constraint_index += 1
+        margin_constraint_index = target_constraint_index
         if margin_threshold_percent is not None:
-            constraint[target_constraint_index] = max(0.0, margin_threshold_percent - margin_percent)
             target_constraint_index += 1
         if current_threshold_a is not None:
-            constraint[target_constraint_index] = max(0.0, abs(solved.operating_current_a) - current_threshold_a)
+            constraint[target_constraint_index] = max(
+                0.0,
+                (abs(solved.operating_current_a) - current_threshold_a)
+                / max(1.0, abs(current_threshold_a)),
+            )
+        # NSGA-II needs both objective values for every geometrically valid
+        # design.  Short-circuiting margin when harmonics/current failed made
+        # the entire infeasible population share a 1e12 margin objective and
+        # falsely left the margin constraint at zero.  That destroys the
+        # trade-off gradient needed to evolve more conductor while improving
+        # field quality, and makes near-feasible diagnostics misleading.
+        margin_percent = load_line_margin_objective(
+            solved.design,
+            tuple(layer.cable_id for layer in topology.layers),
+            targets.cadata_by_layer,
+            targets.temperature_k,
+            fidelity=targets.search_fidelity,
+        )
+        objective = (field_quality, -margin_percent)
+        if margin_threshold_percent is not None:
+            constraint[margin_constraint_index] = max(
+                0.0,
+                (margin_threshold_percent - margin_percent)
+                / max(1.0, abs(margin_threshold_percent)),
+            )
         return objective, constraint, family
     except (KeyError, ValueError, ZeroDivisionError):
         constraint[:] = 0.0
         constraint[0] = 1.0
         return (_PENALTY, _PENALTY), constraint, family
+
+
+def _normalized_geometry_violation(
+    constraint_name: str,
+    severity: float,
+    feasibility: FeasibilitySettings,
+    *,
+    layer_index: int | None = None,
+) -> float:
+    """Convert heterogeneous geometry violations to dimensionless utilization.
+
+    Taking the maximum makes the value independent of the number of turn pairs
+    that happen to report the same collision.
+    """
+
+    if constraint_name == "midplane_clearance":
+        scale = max(0.1, feasibility.min_gap_mm)
+    elif constraint_name == "pole_clearance":
+        scale = max(0.1, feasibility.min_pole_gap_mm or 0.0)
+    elif constraint_name == "first_layer_pole_turn_radius":
+        scale = max(0.1, feasibility.min_pole_turn_radius_mm or 0.0)
+    elif constraint_name == "inter_layer_spacing":
+        scale = max(0.1, feasibility.min_layer_clearance_mm)
+    elif constraint_name in {"inter_block_gap", "electrical_gap", "wedge_gap"}:
+        scale = max(
+            0.1,
+            _layerwise_setting(
+                feasibility.min_inter_block_gap_mm,
+                layer_index,
+            ),
+        )
+    elif constraint_name == "pole_angle_limit":
+        scale = 5.0
+    else:
+        scale = 0.1
+    return max(0.0, float(severity)) / scale
+
+
+def _layerwise_setting(
+    value: float | Sequence[float] | None,
+    layer_index: int | None,
+) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, Real):
+        return float(value)
+    values = tuple(float(item) for item in value)
+    if not values:
+        return 0.0
+    if layer_index is None:
+        return max(values)
+    if layer_index < 0 or layer_index >= len(values):
+        raise ValueError("layerwise feasibility setting does not match the design layers")
+    return values[layer_index]
 
 
 # Process-pool worker state (task 0050): set once per worker process via
@@ -408,7 +597,12 @@ def _init_worker(
     n_ieq_constr: int,
     peak_field_filaments_per_axis: int,
 ) -> None:
-    global _worker_topology, _worker_cable_map, _worker_feasibility, _worker_targets, _worker_n_ieq_constr
+    global \
+        _worker_topology, \
+        _worker_cable_map, \
+        _worker_feasibility, \
+        _worker_targets, \
+        _worker_n_ieq_constr
     _worker_topology = topology
     _worker_cable_map = cable_map
     _worker_feasibility = feasibility

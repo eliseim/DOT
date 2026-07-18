@@ -1,5 +1,11 @@
 # DOT AI Orchestration
 
+> **Historical development archive.** This directory is retained intentionally as a transparent,
+> auditable record of how early DOT tasks were specified and independently reviewed. Individual
+> prompts and verdicts describe the repository at the time of that task and may be obsolete. They
+> are not user documentation or current product requirements; see the root `README.md`,
+> `docs/DOT_IMPLEMENTATION_REPORT.md`, and the current test suite for released behavior.
+
 DOT (Dipole Optimization Tool) is developed using a coordinator/worker/reviewer
 pipeline. This document defines the workflow. Read it before starting or
 reviewing any task.

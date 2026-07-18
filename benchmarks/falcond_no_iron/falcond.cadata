@@ -1,0 +1,24 @@
+VERSION 11
+INSUL 1
+  1 FALCONINS          0.15         0.15 'Fiberglass insulation         '
+ No Name            Radial       Azimut  Comment
+
+REMFIT 1
+  1 FALCONFIT 11  2.14276E+11        29.38           16         0.96         1.52          0.5            2            0            0            0            0 'Bordini fit after cabling degradation'
+ No Name   Type           C1           C2           C3           C4           C5           C6           C7           C8           C9          C10          C11  Comment
+
+FILAMENT 1
+  1 FALCONFIL           58            0 FALCONFIT FALCONFIT 'RRP Ti-doped 162/169          '
+ No Name           fildiao      fildiai Jc-Fit fit-|   Comment
+
+STRAND 1
+  1 FALCONSTR          1.0        0.885   159         4.22           16         1355            0 'ERMC-1 strand                  '
+ No Name             diam.        cu/sc   RRR         Tref         Bref      Jc@BrTr       dJc/dB  Comment
+
+CABLE 1
+  1 FALCONCAB        21.42        1.797        1.989    40          120            0 'Reacted FalconD cable          '
+ No Name            height      width_i      width_o    ns      transp.        degrd  Comment
+
+CONDUCTOR 1
+  1 FALCON       1 FALCONCAB   FALCONSTR FALCONFIL FALCONINS NONE      NONE                 1.9 'FalconD reacted conductor      '
+ No Name       Type CableGeom.  Strand    Filament  Insul     Trans     QuenchMat.           T_o  Comment

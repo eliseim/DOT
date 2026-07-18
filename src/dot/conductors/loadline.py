@@ -3,10 +3,80 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from .cadata import CableRecord, RemfitCoefficients, StrandRecord
-from .critical_current import cable_critical_current
+from .critical_current import cable_critical_current, strand_non_copper_area_m2
 from .critical_surface import critical_current_density_for_fit, upper_critical_field
+
+
+@dataclass(frozen=True, slots=True)
+class ConservativeCurrentAdvice:
+    """Current ceiling estimated by assuming ``Bpeak = Bbore`` in Layer 1."""
+
+    maximum_current_a: float
+    assumed_peak_field_t: float
+    short_sample_field_t: float
+    short_sample_current_a: float
+    operating_fraction: float
+    critical_current_density_a_per_mm2: float
+    strand_total_area_mm2: float
+    strand_non_copper_area_mm2: float
+    cable_non_copper_area_mm2: float
+    cu_to_non_cu_ratio: float
+    cable_degradation_percent: float
+
+
+def conservative_maximum_current_advice(
+    coeffs: RemfitCoefficients,
+    strand: StrandRecord,
+    cable: CableRecord,
+    temperature_k: float,
+    bore_field_t: float,
+    desired_margin_percent: float,
+) -> ConservativeCurrentAdvice:
+    """Estimate a user-facing upper current bound from the critical fit.
+
+    Let ``f = 1 - margin/100``. Points on one linear load line scale from
+    the origin, hence the short-sample field corresponding to an assumed
+    operating peak ``Bop`` is ``Bss = Bop/f``. The fit supplies non-copper
+    ``Jc(Bss,T)``; DOT multiplies it by
+    ``Nstrands*pi*d^2/[4*(1+Cu/nonCu)]`` and the cadata cabling-degradation
+    factor to obtain ``Ic_cable``. The advised operating current is then
+    ``f * Ic_cable(Bss, T)``. In a real dipole ``Bpeak > Bbore``, so
+    using ``Bop = Bbore`` makes this an optimistic upper-bound recommendation,
+    never an
+    automatically imposed constraint.
+    """
+
+    _require_finite_positive(bore_field_t, "bore_field_t")
+    if (
+        not math.isfinite(desired_margin_percent)
+        or desired_margin_percent < 0.0
+        or desired_margin_percent >= 100.0
+    ):
+        raise ValueError("desired_margin_percent must be finite in [0, 100)")
+    operating_fraction = 1.0 - desired_margin_percent / 100.0
+    short_sample_field_t = bore_field_t / operating_fraction
+    jc = critical_current_density_for_fit(short_sample_field_t, temperature_k, coeffs)
+    short_sample_current_a = cable_critical_current(jc, strand, cable)
+    maximum_current_a = operating_fraction * short_sample_current_a
+    strand_total_area_mm2 = math.pi * strand.diameter_mm**2 / 4.0
+    strand_non_copper_area_mm2 = strand_non_copper_area_m2(strand) * 1.0e6
+    cable_non_copper_area_mm2 = cable.n_strands * strand_non_copper_area_mm2
+    return ConservativeCurrentAdvice(
+        maximum_current_a=maximum_current_a,
+        assumed_peak_field_t=bore_field_t,
+        short_sample_field_t=short_sample_field_t,
+        short_sample_current_a=short_sample_current_a,
+        operating_fraction=operating_fraction,
+        critical_current_density_a_per_mm2=jc * 1.0e-6,
+        strand_total_area_mm2=strand_total_area_mm2,
+        strand_non_copper_area_mm2=strand_non_copper_area_mm2,
+        cable_non_copper_area_mm2=cable_non_copper_area_mm2,
+        cu_to_non_cu_ratio=strand.cu_to_non_cu_ratio,
+        cable_degradation_percent=cable.degradation_percent,
+    )
 
 
 def solve_short_sample_current(
@@ -35,7 +105,12 @@ def solve_short_sample_current(
         raise ValueError("max_iterations must be positive")
 
     bc2_t = _bc2(coeffs, temperature_k)
-    domain_upper = math.nextafter(bc2_t / k_field_per_current, 0.0)
+    # Guard in *field* space before converting to current. Moving one ULP
+    # below ``Bc2/k`` in current space is insufficient: multiplying the
+    # resulting current by ``k`` can round straight back to Bc2 and violate
+    # the critical-surface domain. The relative guard is many orders below
+    # any engineering or solver tolerance while remaining numerically stable.
+    domain_upper = (bc2_t * (1.0 - 1.0e-12)) / k_field_per_current
     if not math.isfinite(domain_upper) or domain_upper <= 0.0:
         raise ValueError("load-line upper domain bound must be finite and positive")
     upper = domain_upper if i_hi is None else min(i_hi, domain_upper)

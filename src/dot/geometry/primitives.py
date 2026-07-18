@@ -1,13 +1,13 @@
-"""One-quadrant coil geometry primitives.
+"""One-quadrant coil geometry primitives using ROXIE block angles.
 
-The angle ``phi_deg`` is measured clockwise from the positive y-axis toward
-positive x.  Thus ``phi_deg = 0`` lies on the pole axis and ``phi_deg = 90``
-lies on the midplane.  Keystoned turns are anchored at the midplane-side corner
-of their inner face; rectangular legacy turns retain their inner-face midpoint
-anchor.  The turn anchor remains defined by ``inner_radius_mm`` and
-``phi_deg``.  ROXIE's
-``alpha`` convention is absolute in the global x-y plane: the cable height axis
-depends only on ``alpha_deg``, not on the turn's polar angle.
+``phi_deg`` is measured counter-clockwise from the positive x-axis (the
+midplane) toward the positive y-axis (the pole). Thus ``phi_deg = 0`` is at the
+midplane and ``phi_deg = 90`` is at the pole, matching the CTH-14T ROXIE block
+table. ``alpha_deg`` is ROXIE's absolute cable-frame angle in the same global
+x-y plane: ``alpha_deg = 0`` gives a radial cable-height axis along positive x.
+
+Keystoned turns are anchored at the midplane-side corner of their inner face;
+rectangular legacy turns retain their inner-face midpoint anchor.
 """
 
 from __future__ import annotations
@@ -22,10 +22,19 @@ Point = tuple[float, float]
 
 @dataclass(frozen=True, slots=True)
 class TurnPolygon:
-    """Four corner points of one turn cross-section and its current."""
+    """Four corner points plus the local frame used to build one turn.
+
+    ``anchor``, ``alpha_deg`` and ``cable`` are retained so downstream
+    calculations can derive the bare-conductor envelope without guessing the
+    orientation from its parent block.  They remain optional for compatibility
+    with direct polygon fixtures.
+    """
 
     corners: tuple[Point, Point, Point, Point]
     current_a: float
+    anchor: Point | None = None
+    alpha_deg: float | None = None
+    cable: CableSpec | None = None
 
     @classmethod
     def from_parameters(
@@ -43,7 +52,7 @@ class TurnPolygon:
         _require_finite(current_a, "current_a")
 
         phi = math.radians(phi_deg)
-        radial = (math.sin(phi), math.cos(phi))
+        radial = (math.cos(phi), math.sin(phi))
         anchor = (inner_radius_mm * radial[0], inner_radius_mm * radial[1])
         return cls.from_anchor(
             anchor=anchor,
@@ -82,6 +91,9 @@ class TurnPolygon:
             return cls(
                 corners=(inner_minus, inner_plus, outer_plus, outer_minus),
                 current_a=current_a,
+                anchor=anchor,
+                alpha_deg=alpha_deg,
+                cable=cable,
             )
 
         height = cable.insulated_height_mm
@@ -93,6 +105,9 @@ class TurnPolygon:
         return cls(
             corners=(inner_minus, inner_plus, outer_plus, outer_minus),
             current_a=current_a,
+            anchor=anchor,
+            alpha_deg=alpha_deg,
+            cable=cable,
         )
 
     def __post_init__(self) -> None:
@@ -104,6 +119,11 @@ class TurnPolygon:
             _require_finite(point[0], "corner x")
             _require_finite(point[1], "corner y")
         _require_finite(self.current_a, "current_a")
+        if self.anchor is not None:
+            _require_finite(self.anchor[0], "anchor x")
+            _require_finite(self.anchor[1], "anchor y")
+        if self.alpha_deg is not None:
+            _require_finite(self.alpha_deg, "alpha_deg")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,8 +144,8 @@ class Block:
         _require_finite(self.alpha_deg, "alpha_deg")
         phi = math.radians(self.phi_deg)
         turn_0_anchor = (
-            self.inner_radius_mm * math.sin(phi),
             self.inner_radius_mm * math.cos(phi),
+            self.inner_radius_mm * math.sin(phi),
         )
         anchors = [turn_0_anchor]
         for index in range(1, self.n_turns):
@@ -173,13 +193,13 @@ class DipoleDesign:
 
 
 def _turn_axes(alpha_rad: float) -> tuple[Point, Point]:
-    height_axis = (math.cos(alpha_rad), -math.sin(alpha_rad))
-    width_axis = (math.sin(alpha_rad), math.cos(alpha_rad))
+    height_axis = (math.cos(alpha_rad), math.sin(alpha_rad))
+    width_axis = (-math.sin(alpha_rad), math.cos(alpha_rad))
     return height_axis, width_axis
 
 
 def _turn_alpha_deg(block_alpha_deg: float, cable: CableSpec, turn_index: int) -> float:
-    return block_alpha_deg - turn_index * _keystone_angle_deg(cable)
+    return block_alpha_deg + turn_index * _keystone_angle_deg(cable)
 
 
 def _keystone_angle_deg(cable: CableSpec) -> float:

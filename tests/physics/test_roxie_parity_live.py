@@ -16,9 +16,22 @@ from dot.optimize.operating_point import operating_point
 from dot.optimize.objectives import _peak_field_on_own_turns
 from dot.physics import field_at, place_line_current_sources
 
+pytestmark = pytest.mark.live_roxie
+
 ROXIE_SERVICE_URL = os.environ.get("ROXIE_SERVICE_URL", "http://127.0.0.1:8080")
-ROXIE_TEMPLATE = Path("C:/Users/elisei/Desktop/dipole_designer/10042026_CTH-14T.data")
-ROXIE_CADATA = Path("C:/Users/elisei/Desktop/dipole_designer/roxie_CTH_cables.cadata")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+ROXIE_TEMPLATE = Path(
+    os.environ.get(
+        "DOT_ROXIE_TEMPLATE",
+        "C:/Users/elisei/Desktop/dipole_designer/10042026_CTH-14T.data",
+    )
+)
+ROXIE_CADATA = Path(
+    os.environ.get(
+        "DOT_ROXIE_CADATA",
+        str(REPOSITORY_ROOT / "benchmarks" / "cth14t_no_iron" / "cth14t.cadata"),
+    )
+)
 FIELD_TOLERANCE_REL = 0.02
 MARGIN_TOLERANCE_PERCENTAGE_POINTS = 2.0
 
@@ -92,6 +105,8 @@ def test_live_roxie_field_parity_cth14t(tmp_path: Path) -> None:
         r_ref_mm=16.6667,
     )
 
+    _print_field_comparison("cth14t_no_iron", cth_comparison)
+
     assert cth_comparison.relative_error < FIELD_TOLERANCE_REL
 
 
@@ -100,20 +115,21 @@ def test_live_roxie_field_parity_alpha_zero_single_block(tmp_path: Path) -> None
 
     alpha_zero_comparison = _alpha_zero_single_block_comparison(tmp_path)
 
+    _print_field_comparison("alpha0_single_block_no_iron", alpha_zero_comparison)
+
     assert alpha_zero_comparison.relative_error < FIELD_TOLERANCE_REL
 
 
-def test_live_roxie_field_parity_large_negative_alpha_multiturn_near_pole(tmp_path: Path) -> None:
+def test_live_roxie_field_parity_large_positive_alpha_multiturn_near_pole(tmp_path: Path) -> None:
     """Regression guard for the task 0029/0030 CTH campaign investigation.
 
-    A near-pole block (large negative alpha, matching the
-    AlphaAlignmentRepair target of roughly phi-90) with multiple turns was
+    A near-pole block with a large positive ROXIE alpha and multiple turns was
     suspected of using an incorrect turn-stacking geometry (comparing
     against dipole_designer's simpler linear-step model, which turned out
     to NOT match ROXIE here). Directly validated against live ROXIE
     instead: DOT's existing Block.turns() stacking (_arc_stacked_anchor)
     matches real ROXIE conductor corners to ~0.2mm and bore field to
-    <0.2% relative error even at alpha=-75deg, confirming the geometry is
+    <0.2% relative error even at alpha=75deg, confirming the geometry is
     correct and the near-pole self-overlap/pole-clearance failures seen at
     high turn counts are a genuine physical packing constraint, not a
     coordinate bug.
@@ -121,7 +137,9 @@ def test_live_roxie_field_parity_large_negative_alpha_multiturn_near_pole(tmp_pa
 
     _require_live_roxie()
 
-    pole_comparison = _large_negative_alpha_multiturn_comparison(tmp_path)
+    pole_comparison = _large_positive_alpha_multiturn_comparison(tmp_path)
+
+    _print_field_comparison("pole_alpha75_3turns_no_iron", pole_comparison)
 
     assert pole_comparison.relative_error < FIELD_TOLERANCE_REL
 
@@ -145,6 +163,11 @@ def test_live_roxie_field_parity_alpha_zero_single_turn_cases(
         tmp_path,
         inner_radius_mm=inner_radius_mm,
         phi_deg=phi_deg,
+    )
+
+    _print_field_comparison(
+        f"alpha0_single_turn_r{inner_radius_mm:g}_phi{phi_deg:g}",
+        comparison,
     )
 
     assert comparison.relative_error < FIELD_TOLERANCE_REL
@@ -215,17 +238,7 @@ def test_live_roxie_peak_field_and_margin_parity_cth_hf_and_mixed(tmp_path: Path
 
 
 def test_cth14t_design_passes_corrected_pole_angle_limit() -> None:
-    """The real CTH-14T design must pass the corrected (minimum-from-pole) C17.
-
-    dipole_designer's own test suite confirms this exact design's Layer 1
-    pole-edge angle is ~74.84deg (dd convention) against an 80deg limit
-    (test_cth14t_passes_c17_actual_layer1_pole_edge_limit). DOT's
-    equivalent, corrected check requires every vertex's angle-from-pole to
-    be >= 90-80=10deg; this design's actual closest-to-pole vertex is
-    ~15.19deg, clear of that minimum. Before the fix, DOT's inverted
-    "maximum angle-from-pole" check would have rejected this real, valid
-    design outright (its own midplane block naturally reaches ~89.8deg).
-    """
+    """The real CTH-14T design passes the legacy ROXIE phi edge limit."""
 
     result = check_feasibility(
         _cth14t_design(),
@@ -269,7 +282,7 @@ def test_cth14t_design_with_pole_ward_outer_block_fails_layer_nesting() -> None:
     perturbed_blocks = list(layers[1].blocks)
     original = perturbed_blocks[0]
     perturbed_blocks[0] = Block(
-        phi_deg=2.0,
+        phi_deg=88.0,
         alpha_deg=original.alpha_deg,
         n_turns=original.n_turns,
         cable=original.cable,
@@ -314,9 +327,9 @@ def _alpha_zero_single_block_comparison(tmp_path: Path) -> LiveComparison:
     )
 
 
-def _large_negative_alpha_multiturn_comparison(tmp_path: Path) -> LiveComparison:
-    phi_deg = 15.0
-    alpha_deg = -75.0
+def _large_positive_alpha_multiturn_comparison(tmp_path: Path) -> LiveComparison:
+    phi_deg = 75.0
+    alpha_deg = 75.0
     n_turns = 3
     radius_mm = 30.0
 
@@ -339,8 +352,8 @@ def _large_negative_alpha_multiturn_comparison(tmp_path: Path) -> LiveComparison
         number=1,
         n_turns=n_turns,
         radius_mm=radius_mm,
-        phi_roxie_deg=90.0 - phi_deg,
-        alpha_roxie_deg=-alpha_deg,
+        phi_roxie_deg=phi_deg,
+        alpha_roxie_deg=alpha_deg,
         current_a=current_a,
         conductor_name="CTH_HF",
         n2=20,
@@ -376,7 +389,7 @@ def _alpha_zero_single_turn_comparison(
         number=1,
         n_turns=1,
         radius_mm=inner_radius_mm,
-        phi_roxie_deg=90.0 - phi_deg,
+        phi_roxie_deg=phi_deg,
         alpha_roxie_deg=0.0,
         current_a=current_a,
         conductor_name="CTH_HF",
@@ -565,8 +578,8 @@ def _cth_margin_block_record(number: int, block: Block, conductor_name: str) -> 
         number=number,
         n_turns=block.n_turns,
         radius_mm=block.inner_radius_mm,
-        phi_roxie_deg=90.0 - block.phi_deg,
-        alpha_roxie_deg=-block.alpha_deg,
+        phi_roxie_deg=block.phi_deg,
+        alpha_roxie_deg=block.alpha_deg,
         current_a=block.current_a,
         conductor_name=conductor_name,
         n2=20 if conductor_name == "CTH_HF" else 15,
@@ -600,8 +613,8 @@ def _cth14t_design() -> DipoleDesign:
 def _cth_block(record: tuple[int, int, float, float, float, CableSpec, int]) -> Block:
     _, n_turns, radius_mm, phi_roxie_deg, alpha_roxie_deg, cable, _ = record
     return Block(
-        phi_deg=90.0 - phi_roxie_deg,
-        alpha_deg=-alpha_roxie_deg,
+        phi_deg=phi_roxie_deg,
+        alpha_deg=alpha_roxie_deg,
         n_turns=n_turns,
         cable=cable,
         inner_radius_mm=radius_mm,
@@ -621,6 +634,14 @@ def _dot_field(design: DipoleDesign) -> float:
     return math.hypot(bx_t, by_t)
 
 
+def _print_field_comparison(case_name: str, comparison: LiveComparison) -> None:
+    print(
+        f"ROXIE parity {case_name}: DOT={comparison.dot_field_t:.8f} T, "
+        f"ROXIE={comparison.roxie_field_t:.8f} T, "
+        f"relative error={100.0 * comparison.relative_error:.5f}%"
+    )
+
+
 def _n2_for_block_or_default(block: Block) -> int:
     try:
         return _n2_for_block(block)
@@ -634,8 +655,8 @@ def _n2_for_block(block: Block) -> int:
         if (
             block.n_turns == n_turns
             and block.inner_radius_mm == radius_mm
-            and block.phi_deg == 90.0 - phi_roxie_deg
-            and block.alpha_deg == -alpha_roxie_deg
+            and block.phi_deg == phi_roxie_deg
+            and block.alpha_deg == alpha_roxie_deg
             and block.cable == cable
         ):
             return n2

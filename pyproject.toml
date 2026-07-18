@@ -4,25 +4,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dot"
-version = "0.0.1"
-description = "Dipole Optimization Tool package skeleton"
+version = "0.1.0"
+description = "Autonomous 2D air-core superconducting dipole optimization and certification"
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    {name = "Mattia Elisei"},
+]
+license = {file = "LICENSE"}
+keywords = ["accelerator", "dipole", "magnet", "optimization", "superconducting"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
-    "numpy",
+    "matplotlib>=3.7",
+    # Numba 0.66 supports NumPy through 2.4.  Keeping the upper bound here
+    # means the optional acceleration extra can always be installed into the
+    # same environment as the core application.
+    "numpy>=1.26,<2.5",
+    "pymoo>=0.6.1,<0.7",
 ]
 
 [project.optional-dependencies]
+acceleration = [
+    "numba>=0.66,<0.67",
+]
 dev = [
     "pytest",
     "ruff",
 ]
-gui = [
-    "matplotlib>=3.7",
+roxie = [
+    "requests>=2.31",
 ]
-optimization = [
-    "pymoo>=0.6",
-]
+[project.scripts]
+dot = "dot.cli:main"
+dot-gui = "dot.gui.target_synthesis_gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -35,3 +58,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "slow: convergence or high-fidelity benchmark tests not run in the default CI job",
+    "live_roxie: optional tests requiring a licensed local ROXIE installation",
+]

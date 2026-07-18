@@ -30,6 +30,7 @@ CABLE 1
 
     assert records.strands["STR01"].diameter_mm == 1.065
     assert records.strands["STR01"].cu_to_sc_ratio == 1.6
+    assert records.strands["STR01"].cu_to_non_cu_ratio == 1.6
     assert records.cables["CABLE01"].n_strands == 28
     assert records.cables["CABLE01"].degradation_percent == 5.0
     assert records.remfits["FIT1"] == Type1FitCoefficients(
@@ -62,17 +63,17 @@ REMFIT 1
     )
 
 
-def test_parse_cadata_text_rejects_unsupported_remfit() -> None:
+def test_parse_cadata_text_preserves_unsupported_remfit() -> None:
     text = """
 REMFIT 1
   1 NB3SNA 5         3.5E+10           28           18            0            0            0            0            0            0            0            0 'PIT strand fit poor'
 """
 
-    with pytest.raises(UnsupportedFitTypeError) as exc_info:
-        parse_cadata_text(text)
+    records = parse_cadata_text(text)
 
-    assert exc_info.value.fit_type == 5
-    assert exc_info.value.name == "NB3SNA"
+    assert records.remfits == {}
+    assert records.unsupported_remfits["NB3SNA"].fit_type == 5
+    assert records.unsupported_remfits["NB3SNA"].values[:3] == (3.5e10, 28.0, 18.0)
 
 
 def test_named_type1_remfit_ignores_unrelated_unsupported_records() -> None:

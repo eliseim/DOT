@@ -1,4 +1,10 @@
-"""Minimal ROXIE ``.cadata`` conductor records used for critical-current work."""
+"""Typed ROXIE ``.cadata`` records used by geometry and critical-current work.
+
+The parser deliberately preserves links between ``CONDUCTOR``, ``CABLE``,
+``STRAND``, ``FILAMENT``, ``INSUL`` and ``REMFIT`` records.  Selecting the
+first record from each section independently is not safe: real catalogues
+contain many unrelated conductor families.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,13 @@ from typing import Literal
 
 @dataclass(frozen=True, slots=True)
 class StrandRecord:
-    """Strand inputs needed to convert superconductor Jc into strand Ic."""
+    """Strand inputs needed to convert non-copper ``Jc`` into strand ``Ic``.
+
+    ROXIE labels the second quantity ``cu/sc``.  For the supported Nb-Ti and
+    Nb3Sn fits it is interpreted as the engineering Cu/non-Cu area ratio: the
+    fitted ``Jc`` is referred to the whole non-copper area, not only to the
+    current-carrying Nb3Sn phase.
+    """
 
     diameter_mm: float
     cu_to_sc_ratio: float
@@ -19,13 +31,28 @@ class StrandRecord:
         _require_finite_positive(self.diameter_mm, "diameter_mm")
         _require_finite_nonnegative(self.cu_to_sc_ratio, "cu_to_sc_ratio")
 
+    @property
+    def cu_to_non_cu_ratio(self) -> float:
+        """Return ROXIE ``cu/sc`` with its physical Cu/non-Cu meaning."""
+
+        return self.cu_to_sc_ratio
+
 
 @dataclass(frozen=True, slots=True)
 class CableRecord:
-    """Cable inputs needed to compose strand Ic into cable Ic."""
+    """Cable electrical and geometric data.
+
+    Geometry fields are optional for backwards compatibility with small
+    critical-current-only fixtures.  A resolved design conductor requires
+    them before it can be converted to :class:`dot.geometry.CableSpec`.
+    """
 
     n_strands: int
     degradation_percent: float
+    height_mm: float | None = None
+    width_inner_mm: float | None = None
+    width_outer_mm: float | None = None
+    transposition_pitch_mm: float | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.n_strands, bool) or not isinstance(self.n_strands, int):
@@ -35,6 +62,37 @@ class CableRecord:
         _require_finite_nonnegative(self.degradation_percent, "degradation_percent")
         if self.degradation_percent > 100.0:
             raise ValueError("degradation_percent must be <= 100")
+        for name, value in (
+            ("height_mm", self.height_mm),
+            ("width_inner_mm", self.width_inner_mm),
+            ("width_outer_mm", self.width_outer_mm),
+        ):
+            if value is not None:
+                _require_finite_positive(value, name)
+        if self.transposition_pitch_mm is not None:
+            _require_finite_nonnegative(
+                self.transposition_pitch_mm, "transposition_pitch_mm"
+            )
+
+    @property
+    def has_geometry(self) -> bool:
+        return (
+            self.height_mm is not None
+            and self.width_inner_mm is not None
+            and self.width_outer_mm is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InsulationRecord:
+    """Radial and azimuthal turn insulation from one ``INSUL`` row."""
+
+    radial_mm: float
+    azimuthal_mm: float
+
+    def __post_init__(self) -> None:
+        _require_finite_nonnegative(self.radial_mm, "radial_mm")
+        _require_finite_nonnegative(self.azimuthal_mm, "azimuthal_mm")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +152,18 @@ class FilamentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class UnsupportedRemfitRecord:
+    """A preserved REMFIT row whose equation is not implemented by DOT."""
+
+    name: str
+    fit_type: int
+    values: tuple[float, ...]
+    comment: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ConductorRecord:
-    """One ROXIE CONDUCTOR row linking cable, strand, and REMFIT names."""
+    """One ROXIE CONDUCTOR row linking its catalogue records."""
 
     number: int
     name: str
@@ -105,9 +173,20 @@ class ConductorRecord:
     filament_name: str
     insul_name: str
     transient_name: str
-    remfit_name: str
+    quench_material_name: str
     temperature_k: float
     comment: str
+
+    @property
+    def remfit_name(self) -> str:
+        """Compatibility alias for the historically misnamed column.
+
+        Column 8 of a ROXIE ``CONDUCTOR`` row is the quench-material name,
+        not a critical-current REMFIT.  Critical-current resolution must go
+        through the linked ``FILAMENT`` row.
+        """
+
+        return self.quench_material_name
 
 
 ConductorResolutionStatus = Literal["resolved", "not_found", "unsupported_fit_type"]
@@ -122,6 +201,7 @@ class ConductorResolution:
     conductor: ConductorRecord | None = None
     strand: StrandRecord | None = None
     cable: CableRecord | None = None
+    insulation: InsulationRecord | None = None
     remfit: RemfitCoefficients | None = None
     temperature_k: float | None = None
     unsupported_fit_type: int | None = None
@@ -131,6 +211,27 @@ class ConductorResolution:
     @property
     def is_resolved(self) -> bool:
         return self.status == "resolved"
+
+    def cable_spec(self):  # noqa: ANN201
+        """Return the linked cable geometry as a ``CableSpec``.
+
+        The local import keeps the conductor catalogue independent of the
+        geometry module at import time.
+        """
+
+        if self.cable is None or not self.cable.has_geometry:
+            raise ValueError(f"CONDUCTOR record {self.conductor_name!r} has no complete cable geometry")
+        if self.insulation is None:
+            raise ValueError(f"CONDUCTOR record {self.conductor_name!r} has no linked INSUL record")
+        from dot.geometry import CableSpec
+
+        return CableSpec(
+            height_mm=self.cable.height_mm,
+            width_inner_mm=self.cable.width_inner_mm,
+            width_outer_mm=self.cable.width_outer_mm,
+            insulation_radial_mm=self.insulation.radial_mm,
+            insulation_azimuthal_mm=self.insulation.azimuthal_mm,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,13 +243,17 @@ class CadataRecords:
     remfits: dict[str, RemfitCoefficients]
     filaments: dict[str, FilamentRecord]
     conductors: dict[str, ConductorRecord]
+    insulations: dict[str, InsulationRecord]
+    unsupported_remfits: dict[str, UnsupportedRemfitRecord]
 
 
 class UnsupportedFitTypeError(ValueError):
     """Raised when a REMFIT row uses a fit type outside this task's scope."""
 
     def __init__(self, fit_type: int, name: str) -> None:
-        super().__init__(f"unsupported REMFIT type {fit_type} for {name!r}; only type 1 is supported")
+        super().__init__(
+            f"unsupported REMFIT type {fit_type} for {name!r}; supported types are 1 and 11"
+        )
         self.fit_type = fit_type
         self.name = name
 
@@ -164,17 +269,18 @@ def parse_cadata_text(
     The ROXIE catalogue format is section-count based. Relevant rows use these
     columns after tokenization:
 
-    * ``STRAND``: ``No Name diam. cu/sc ...``
+    * ``STRAND``: ``No Name diam. cu/sc ...`` (Cu/non-Cu area ratio)
     * ``CABLE``: ``No Name height width_i width_o ns transp. degrd ...``
     * ``REMFIT``: ``No Name Type C1 C2 C3 C4 C5 C6 C7 C8 ...``
     * ``FILAMENT``: ``No Name fildiao fildiai Jc-Fit fit-| Comment``
+    * ``INSUL``: ``No Name Radial Azimut Comment``
     * ``CONDUCTOR``:
-      ``No Name Type Cable Strand Filament Insul Transient REMFIT T_o Comment``
+      ``No Name Type Cable Strand Filament Insul Transient QuenchMat T_o Comment``
 
     Other sections and trailing human-readable header rows are ignored. By
-    default, all REMFIT rows are parsed eagerly and any unsupported type raises.
-    Pass ``remfit_name`` or ``first_supported_remfit`` to parse only the REMFIT
-    row the caller needs.
+    By default, supported REMFIT rows are parsed and unsupported rows are
+    preserved in ``unsupported_remfits``.  Selecting a named unsupported fit
+    still raises :class:`UnsupportedFitTypeError`.
     """
 
     if remfit_name is not None and first_supported_remfit:
@@ -183,10 +289,11 @@ def parse_cadata_text(
     sections = _section_rows(text.splitlines())
     strands = _parse_strands(sections.get("STRAND", ()))
     cables = _parse_cables(sections.get("CABLE", ()))
+    insulations = _parse_insulations(sections.get("INSUL", ()))
     filaments = _parse_filaments(sections.get("FILAMENT", ()))
     conductors = _parse_conductors(sections.get("CONDUCTOR", ()))
 
-    remfits = _parse_remfits(
+    remfits, unsupported_remfits = _parse_remfits(
         sections.get("REMFIT", ()),
         remfit_name=remfit_name,
         first_supported_remfit=first_supported_remfit,
@@ -198,6 +305,8 @@ def parse_cadata_text(
         remfits=remfits,
         filaments=filaments,
         conductors=conductors,
+        insulations=insulations,
+        unsupported_remfits=unsupported_remfits,
     )
 
 
@@ -230,6 +339,7 @@ def resolve_conductor(text: str, name: str) -> ConductorResolution:
 
     strands = _parse_strands(sections.get("STRAND", ()))
     cables = _parse_cables(sections.get("CABLE", ()))
+    insulations = _parse_insulations(sections.get("INSUL", ()))
     filaments = _parse_filaments(sections.get("FILAMENT", ()))
     try:
         strand = strands[conductor.strand_name]
@@ -239,6 +349,10 @@ def resolve_conductor(text: str, name: str) -> ConductorResolution:
         cable = cables[conductor.cable_name]
     except KeyError as exc:
         raise ValueError(f"CABLE record {conductor.cable_name!r} not found") from exc
+    try:
+        insulation = insulations[conductor.insul_name]
+    except KeyError as exc:
+        raise ValueError(f"INSUL record {conductor.insul_name!r} not found") from exc
 
     remfit_name = _critical_current_remfit_name(conductor, filaments)
     remfit_row = _find_remfit_row(sections.get("REMFIT", ()), remfit_name)
@@ -251,6 +365,7 @@ def resolve_conductor(text: str, name: str) -> ConductorResolution:
             conductor=conductor,
             strand=strand,
             cable=cable,
+            insulation=insulation,
             temperature_k=conductor.temperature_k,
             unsupported_fit_type=exc.fit_type,
             remfit_name=exc.name,
@@ -263,6 +378,7 @@ def resolve_conductor(text: str, name: str) -> ConductorResolution:
         conductor=conductor,
         strand=strand,
         cable=cable,
+        insulation=insulation,
         remfit=remfit,
         temperature_k=conductor.temperature_k,
         remfit_name=remfit_name,
@@ -290,8 +406,24 @@ def _parse_cables(rows: list[list[str]]) -> dict[str, CableRecord]:
         cables[row[1]] = CableRecord(
             n_strands=int(float(row[5])),
             degradation_percent=float(row[7]),
+            height_mm=float(row[2]),
+            width_inner_mm=float(row[3]),
+            width_outer_mm=float(row[4]),
+            transposition_pitch_mm=float(row[6]),
         )
     return cables
+
+
+def _parse_insulations(rows: list[list[str]]) -> dict[str, InsulationRecord]:
+    insulations: dict[str, InsulationRecord] = {}
+    for row in rows:
+        if len(row) < 4:
+            raise ValueError(f"INSUL row has too few columns: {row!r}")
+        insulations[row[1]] = InsulationRecord(
+            radial_mm=float(row[2]),
+            azimuthal_mm=float(row[3]),
+        )
+    return insulations
 
 
 def _parse_filaments(rows: list[list[str]]) -> dict[str, FilamentRecord]:
@@ -318,7 +450,7 @@ def _parse_conductors(rows: list[list[str]]) -> dict[str, ConductorRecord]:
             filament_name=row[5],
             insul_name=row[6],
             transient_name=row[7],
-            remfit_name=row[8],
+            quench_material_name=row[8],
             temperature_k=float(row[9]),
             comment=comment,
         )
@@ -331,9 +463,12 @@ def _critical_current_remfit_name(
     filaments: dict[str, FilamentRecord],
 ) -> str:
     filament = filaments.get(conductor.filament_name)
-    if filament is not None:
-        return filament.jc_fit_name
-    return conductor.remfit_name
+    if filament is None:
+        raise ValueError(
+            f"FILAMENT record {conductor.filament_name!r} not found; "
+            "the CONDUCTOR quench-material column is not a REMFIT fallback"
+        )
+    return filament.jc_fit_name
 
 
 def _parse_remfits(
@@ -341,7 +476,7 @@ def _parse_remfits(
     *,
     remfit_name: str | None,
     first_supported_remfit: bool,
-) -> dict[str, RemfitCoefficients]:
+) -> tuple[dict[str, RemfitCoefficients], dict[str, UnsupportedRemfitRecord]]:
     if remfit_name is not None:
         for row in rows:
             if len(row) < 2:
@@ -349,10 +484,11 @@ def _parse_remfits(
             name = row[1]
             if name != remfit_name:
                 continue
-            return {name: _parse_supported_remfit_row(row)}
+            return {name: _parse_supported_remfit_row(row)}, {}
         raise ValueError(f"REMFIT record {remfit_name!r} not found")
 
     remfits: dict[str, RemfitCoefficients] = {}
+    unsupported: dict[str, UnsupportedRemfitRecord] = {}
     for row in rows:
         if first_supported_remfit:
             if len(row) < 3:
@@ -360,11 +496,36 @@ def _parse_remfits(
             fit_type = int(float(row[2]))
             if fit_type not in (1, 11):
                 continue
-        fit = _parse_supported_remfit_row(row)
+        try:
+            fit = _parse_supported_remfit_row(row)
+        except UnsupportedFitTypeError:
+            if first_supported_remfit:
+                continue
+            unsupported_row = _unsupported_remfit_row(row)
+            unsupported[unsupported_row.name] = unsupported_row
+            continue
         remfits[row[1]] = fit
         if first_supported_remfit:
             break
-    return remfits
+    return remfits, unsupported
+
+
+def _unsupported_remfit_row(row: list[str]) -> UnsupportedRemfitRecord:
+    if len(row) < 3:
+        raise ValueError(f"REMFIT row has too few columns: {row!r}")
+    values: list[float] = []
+    for token in row[3:14]:
+        try:
+            values.append(float(token))
+        except ValueError:
+            break
+    comment = row[14] if len(row) > 14 else ""
+    return UnsupportedRemfitRecord(
+        name=row[1],
+        fit_type=int(float(row[2])),
+        values=tuple(values),
+        comment=comment,
+    )
 
 
 def _find_remfit_row(rows: list[list[str]], remfit_name: str) -> list[str]:
@@ -388,7 +549,7 @@ def _parse_supported_remfit_row(row: list[str]) -> RemfitCoefficients:
 
 def _section_rows(lines: list[str]) -> dict[str, list[list[str]]]:
     sections: dict[str, list[list[str]]] = {}
-    known_sections = {"STRAND", "CABLE", "REMFIT", "FILAMENT", "CONDUCTOR"}
+    known_sections = {"STRAND", "CABLE", "REMFIT", "FILAMENT", "CONDUCTOR", "INSUL"}
     index = 0
     while index < len(lines):
         match = re.match(r"^([A-Z][A-Z0-9_]*)\s+(\d+)\s*$", lines[index].strip())

@@ -21,6 +21,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import ArrayLike
 
+from dot.acceleration import JIT_ENABLED
+
+from ._kernels import biot_savart_many
 from .sources import LineCurrentSource
 
 MU0_OVER_2PI = 2.0e-7
@@ -164,6 +167,18 @@ def field_at_many_explicit_sources(
     if n_sources == 0:
         zeros = np.zeros(probe_shape, dtype=np.float64)
         return (zeros.copy(), zeros.copy())
+
+    if JIT_ENABLED:
+        bx_t, by_t, singular = biot_savart_many(
+            source_array.x_mm,
+            source_array.y_mm,
+            source_array.current_a,
+            x_probe_flat,
+            y_probe_flat,
+        )
+        if singular:
+            raise FieldSingularityError("probe point coincides with a source")
+        return (bx_t.reshape(probe_shape), by_t.reshape(probe_shape))
 
     sources_per_chunk = _field_sources_per_chunk(n_probe)
     bx_t = np.zeros(n_probe, dtype=np.float64)

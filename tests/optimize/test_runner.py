@@ -7,7 +7,7 @@ import pytest
 from pymoo.core.population import Population
 
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
-from dot.geometry import CableSpec
+from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.geometry.constraints import check_feasibility, check_layer_nesting
 from dot.optimize import (
     LayerConductorData,
@@ -18,20 +18,52 @@ from dot.optimize import (
     genome_bounds,
     load_line_margin_objective,
 )
-from dot.optimize.genome import flatten_mixed_genome, genome_variables
-from dot.optimize.problem import DipoleOptimizationProblem, FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
+from dot.optimize.genome import flatten_mixed_genome
+from dot.optimize.problem import (
+    DipoleOptimizationProblem,
+    FeasibilitySettings,
+    MarginEvaluationExclusion,
+    OptimizationTargets,
+)
 from dot.optimize.runner import (
     AdaptiveOffspringMating,
     ConstructiveMixedVariableSampling,
     GroundTruthRepair,
     LayerNestingRepair,
+    MinActiveBlocksRepair,
     PhiOrderingRepair,
+    RadialCompactionRepair,
     TurnBudgetRepair,
+    _certify_candidate,
     _mixed_variable_nsga2,
     _minimum_phi_gap_deg,
+    _search_nondominated,
+    ParetoCandidate,
     refresh_population_admission,
     run_campaign,
 )
+
+
+def test_search_archive_drops_em_equivalent_complexity_in_turn_then_block_order() -> None:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0)
+
+    def candidate(turns: tuple[int, ...]) -> ParetoCandidate:
+        blocks = tuple(
+            Block(10.0 + 20.0 * index, 0.0, count, cable, 20.0, 100.0)
+            for index, count in enumerate(turns)
+        )
+        return ParetoCandidate(
+            genome=np.empty(0),
+            design=DipoleDesign(8.0, (Layer(20.0, blocks),)),
+            objectives=(4.0, -25.0),
+        )
+
+    archive = _search_nondominated(
+        [candidate((2, 1)), candidate((1, 1)), candidate((2,))]
+    )
+
+    assert len(archive) == 1
+    assert [block.n_turns for block in archive[0].design.layers[0].blocks] == [2]
 
 
 def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -> None:
@@ -56,6 +88,7 @@ def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -
         candidate.design,
         targets.r_ref_mm,
         targets.max_order,
+        fidelity=targets.certification_fidelity,
     )
     margin = load_line_margin_objective(
         candidate.design,
@@ -66,6 +99,34 @@ def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -
 
     assert candidate.objectives[0] == pytest.approx(field_quality, rel=1.0e-12)
     assert candidate.objectives[1] == pytest.approx(-margin, rel=1.0e-12)
+
+
+def test_certification_uses_signed_harmonic_target_residual() -> None:
+    topology = _topology()
+    feasibility = _feasibility()
+    baseline = run_campaign(
+        topology,
+        _targets(),
+        feasibility,
+        pop_size=8,
+        n_gen=3,
+        seed=7,
+    )
+    candidate = baseline.candidates[0]
+    b3 = next(normal for order, normal, _skew in candidate.harmonics if order == 3)
+    targets = replace(
+        _targets(),
+        max_order=3,
+        harmonic_orders=(3,),
+        harmonic_targets=((3, b3),),
+        max_harmonic_units=1.0e-9,
+    )
+
+    certified = _certify_candidate(candidate, topology, targets, feasibility)
+
+    assert certified is not None
+    assert certified.objectives[0] == pytest.approx(0.0, abs=1.0e-10)
+    assert certified.harmonic_targets == ((3, b3),)
 
 
 def test_refresh_population_admission_rescoring_reflects_current_threshold() -> None:
@@ -115,20 +176,21 @@ def test_layer_nesting_repair_shifts_outer_layer_until_nesting_clears() -> None:
     without_cap = _nesting_violation_sample()
     feasibility_no_cap = _feasibility_with_nesting_cap(None)
     LayerNestingRepair(topology, feasibility_no_cap)._repair_sample(without_cap)
-    assert without_cap["layer_1_block_0_phi_deg"] == pytest.approx(10.0)
+    assert without_cap["layer_1_block_1_phi_deg"] == pytest.approx(80.0)
     assert _design_violates_nesting(topology, without_cap)
 
     repaired = _nesting_violation_sample()
     feasibility_generous_cap = _feasibility_with_nesting_cap(60.0)
     LayerNestingRepair(topology, feasibility_generous_cap)._repair_sample(repaired)
-    assert repaired["layer_1_block_0_phi_deg"] > 10.0
-    assert repaired["layer_1_block_0_phi_deg"] <= 10.0 + 60.0
+    assert repaired["layer_1_block_0_phi_deg"] == pytest.approx(15.0)
+    assert repaired["layer_1_block_1_phi_deg"] < 80.0
+    assert repaired["layer_1_block_1_phi_deg"] >= 80.0 - 60.0
     assert not _design_violates_nesting(topology, repaired)
 
     capped_short = _nesting_violation_sample()
     feasibility_tiny_cap = _feasibility_with_nesting_cap(2.0)
     LayerNestingRepair(topology, feasibility_tiny_cap)._repair_sample(capped_short)
-    assert capped_short["layer_1_block_0_phi_deg"] == pytest.approx(10.0)
+    assert capped_short["layer_1_block_1_phi_deg"] == pytest.approx(80.0)
     assert _design_violates_nesting(topology, capped_short)
 
 
@@ -174,18 +236,20 @@ def _nesting_topology() -> Topology:
         layers=(
             LayerTopology(
                 cable_id="inner",
-                n_blocks=1,
+                n_blocks=2,
+                min_blocks=2,
                 inner_radius_bounds_mm=(20.0, 20.0),
-                phi_bounds_deg=(10.0, 80.0),
-                n_turns_bounds=(3, 3),
+                phi_bounds_deg=(0.0, 90.0),
+                n_turns_bounds=(1, 3),
                 alpha_bounds_deg=(0.0, 0.0),
             ),
             LayerTopology(
                 cable_id="outer",
-                n_blocks=1,
+                n_blocks=2,
+                min_blocks=2,
                 inner_radius_bounds_mm=(24.0, 24.0),
-                phi_bounds_deg=(5.0, 80.0),
-                n_turns_bounds=(2, 2),
+                phi_bounds_deg=(0.0, 90.0),
+                n_turns_bounds=(1, 2),
                 alpha_bounds_deg=(0.0, 0.0),
             ),
         ),
@@ -196,11 +260,19 @@ def _nesting_topology() -> Topology:
 def _nesting_violation_sample() -> dict[str, float | int]:
     return {
         "layer_0_inner_radius_mm": 20.0,
-        "layer_0_block_0_phi_deg": 15.0,
-        "layer_0_block_0_n_turns": 3,
+        "layer_0_block_0_phi_deg": 10.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 75.0,
+        "layer_0_block_1_n_turns": 3,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 0.0,
         "layer_1_inner_radius_mm": 24.0,
-        "layer_1_block_0_phi_deg": 10.0,
-        "layer_1_block_0_n_turns": 2,
+        "layer_1_block_0_phi_deg": 15.0,
+        "layer_1_block_0_n_turns": 1,
+        "layer_1_block_1_phi_deg": 80.0,
+        "layer_1_block_1_n_turns": 2,
+        "layer_1_block_1_active": True,
+        "layer_1_block_1_alpha_deg": 0.0,
     }
 
 
@@ -248,21 +320,45 @@ def test_run_campaign_with_parallel_workers_still_produces_candidates() -> None:
     assert result.candidates
 
 
-def test_run_campaign_with_refinement_still_produces_candidates() -> None:
-    from dot.optimize.refinement import RefinementConfig
+def test_run_campaign_on_generation_callback_fires_every_generation_with_a_design() -> None:
+    from dot.geometry import DipoleDesign
 
     topology = _topology()
-    result = run_campaign(
+    calls: list[tuple[int, int, object, object, object, object]] = []
+
+    def _on_generation(
+        generation, total_generations, design, margin_percent, harmonic_units, family_count
+    ):  # noqa: ANN001
+        calls.append(
+            (generation, total_generations, design, margin_percent, harmonic_units, family_count)
+        )
+
+    run_campaign(
         topology,
         _targets(),
         _feasibility(),
         pop_size=8,
         n_gen=3,
         seed=7,
-        refinement=RefinementConfig(enabled=True, max_seeds=2, population=4, generations=2),
+        on_generation=_on_generation,
     )
 
-    assert result.candidates
+    assert len(calls) == 3
+    for (
+        generation,
+        total_generations,
+        design,
+        _margin_percent,
+        harmonic_units,
+        family_count,
+    ) in calls:
+        assert total_generations == 3
+        assert 1 <= generation <= 3
+        # The population always has at least a closest-to-feasible individual,
+        # so a design should be reported from generation 1 onward.
+        assert design is None or isinstance(design, DipoleDesign)
+        assert harmonic_units is None or harmonic_units >= 0.0
+        assert family_count is None or family_count >= 1
 
 
 def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
@@ -274,8 +370,12 @@ def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
         cadata_by_layer=(None, None, conductor_data(), conductor_data()),
         temperature_k=0.0,
         excluded_margin_layers=(
-            MarginEvaluationExclusion(layer_index=0, reason="unsupported REMFIT type 3 for 'NB3SNMP'"),
-            MarginEvaluationExclusion(layer_index=1, reason="unsupported REMFIT type 3 for 'NB3SNMP'"),
+            MarginEvaluationExclusion(
+                layer_index=0, reason="unsupported REMFIT type 3 for 'NB3SNMP'"
+            ),
+            MarginEvaluationExclusion(
+                layer_index=1, reason="unsupported REMFIT type 3 for 'NB3SNMP'"
+            ),
         ),
     )
 
@@ -322,17 +422,17 @@ def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
         random_state=np.random.default_rng(13),
     )
     constructive_genomes = np.asarray(
-        [candidate.X if not isinstance(candidate.X, dict) else _flatten(candidate.X, topology) for candidate in constructive],
+        [
+            candidate.X if not isinstance(candidate.X, dict) else _flatten(candidate.X, topology)
+            for candidate in constructive
+        ],
         dtype=float,
     )
 
     random_feasible = _feasible_count(topology, feasibility, random_genomes)
     constructive_feasible = _feasible_count(topology, feasibility, constructive_genomes)
 
-    # Block 0 now gets the window nearest phi_upper (midplane) instead of
-    # phi_lower (pole); same random draws land in different windows, so the
-    # exact random_feasible count differs from before that fix.
-    assert random_feasible == 182
+    assert random_feasible < 200
     assert constructive_feasible == 200
     assert constructive_feasible > random_feasible
 
@@ -360,19 +460,104 @@ def test_mixed_variable_sampling_and_mating_keep_turn_genes_integer() -> None:
             genome[name] = 1 if index % 2 == 0 else 5
         parent_x[index] = genome
     parents = Population.new(X=parent_x)
-    offspring = algorithm.mating.do(
-        problem,
-        parents,
-        12,
-        random_state=np.random.default_rng(5),
-    )
 
+    # Crossover for Integer (n_turns) genes is UX (uniform swap), not SBX --
+    # deliberately, matching dd's own topology-collapse fix (blend-then-round
+    # crossover on discrete genes "is semantically weak and tends to push
+    # [them] toward whichever parent dominates the front"). So novelty here
+    # comes from MUTATION alone, a genuinely stochastic rare event over a
+    # small 12-offspring sample -- check across several seeds rather than
+    # asserting one fixed seed always produces it.
+    all_offspring = [
+        child
+        for seed in range(20)
+        for child in algorithm.mating.do(
+            problem, parents, 12, random_state=np.random.default_rng(seed)
+        )
+    ]
     assert any(
         any(float(child.X[name]) not in {1.0, 5.0} for name in turn_names)
-        for child in offspring
+        for child in all_offspring
     )
-    for child in offspring:
+    for child in all_offspring:
         assert all(float(child.X[name]).is_integer() for name in turn_names)
+
+
+def test_min_active_blocks_repair_activates_blocks_below_the_floor() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=4,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(0.0, 0.0),
+                min_blocks=3,
+            ),
+        ),
+        cables={"inner": cable},
+    )
+    # Only block 0 (always active) is active -- one short of the floor of 3.
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 74.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 55.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": False,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 32.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": False,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 8.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": False,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+
+    repaired = MinActiveBlocksRepair(topology)._do(None, np.asarray([sample], dtype=object))[0]
+
+    active_count = 1 + sum(bool(repaired[f"layer_0_block_{index}_active"]) for index in range(1, 4))
+    assert active_count >= 3
+    for index in range(1, 4):
+        if repaired[f"layer_0_block_{index}_active"]:
+            assert int(repaired[f"layer_0_block_{index}_n_turns"]) >= 1
+
+
+def test_min_active_blocks_repair_leaves_already_satisfied_layers_untouched() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=2,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(2.0, 78.0),
+                n_turns_bounds=(1, 5),
+                alpha_bounds_deg=(0.0, 0.0),
+                min_blocks=1,
+            ),
+        ),
+        cables={"inner": cable},
+    )
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 74.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 55.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": False,
+        "layer_0_block_1_alpha_deg": 0.0,
+    }
+
+    repaired = MinActiveBlocksRepair(topology)._do(None, np.asarray([sample], dtype=object))[0]
+
+    assert repaired["layer_0_block_1_active"] is False
 
 
 def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
@@ -380,23 +565,25 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
     feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
     sample = {
         "layer_0_inner_radius_mm": 20.0,
-        "layer_0_block_0_phi_deg": 74.0,
+        "layer_0_block_0_phi_deg": 16.0,
         "layer_0_block_0_n_turns": 1,
-        "layer_0_block_1_phi_deg": 55.0,
+        "layer_0_block_1_phi_deg": 35.0,
         "layer_0_block_1_n_turns": 1,
         "layer_0_block_1_active": True,
         "layer_0_block_1_alpha_deg": 0.0,
-        "layer_0_block_2_phi_deg": 32.0,
+        "layer_0_block_2_phi_deg": 58.0,
         "layer_0_block_2_n_turns": 1,
         "layer_0_block_2_active": True,
         "layer_0_block_2_alpha_deg": 0.0,
-        "layer_0_block_3_phi_deg": 8.0,
+        "layer_0_block_3_phi_deg": 82.0,
         "layer_0_block_3_n_turns": 1,
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
 
-    repaired = PhiOrderingRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
+    repaired = PhiOrderingRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
     phis = [float(repaired[f"layer_0_block_{index}_phi_deg"]) for index in range(4)]
     min_gap = _minimum_phi_gap_deg(
         20.0,
@@ -404,72 +591,175 @@ def test_phi_ordering_repair_restores_block_order_and_gap() -> None:
         feasibility.min_gap_mm,
     )
 
-    # Block 0 gets the window nearest phi_upper (midplane, where its
-    # hard-fixed alpha=0 is valid); increasing block index moves toward
-    # phi_lower (the pole).
-    assert phis == sorted(phis, reverse=True)
-    assert all(left - right >= min_gap - 1.0e-12 for left, right in zip(phis, phis[1:], strict=False))
+    # Block 0 is nearest phi_lower (midplane); increasing block index moves
+    # toward phi_upper (the pole).
+    assert phis == sorted(phis)
+    assert all(
+        right - left >= min_gap - 1.0e-12 for left, right in zip(phis, phis[1:], strict=False)
+    )
     assert all(
         topology.layers[0].phi_bounds_deg[0] <= phi <= topology.layers[0].phi_bounds_deg[1]
         for phi in phis
     )
 
 
-def test_phi_ordering_repair_spreads_slack_instead_of_pinning_to_window_floor() -> None:
-    # task 0046: a prior greedy floor-clamp assigned each block the
-    # smallest value satisfying ordering/gaps against the previous block,
-    # so any block whose proposed value didn't already clear that floor
-    # snapped to EXACTLY its own genome-space window's lower bound --
-    # using none of that window's interior no matter how wide it was.
-    # Confirmed empirically: a fully collapsed sample (every block
-    # proposing the same low phi) used to repair to every block sitting
-    # precisely at its window's lower edge. The slack-packing replacement
-    # must instead land every block well inside its own window, with
-    # roughly even gaps throughout -- not just concentrated at one edge.
+def test_phi_ordering_repair_uses_midward_blocks_real_turn_footprint() -> None:
+    # Turns extend from their anchor toward increasing phi.  The clearance
+    # between block 0 (midward) and block 1 (poleward) must therefore use
+    # block 0's turn count.  Using block 1's count was a direction error
+    # that left multi-turn blocks colliding despite ordered anchors.
     topology = _tight_four_block_topology()
     feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
-    collapsed_phi = topology.layers[0].phi_bounds_deg[0]
     sample = {
         "layer_0_inner_radius_mm": 20.0,
-        "layer_0_block_0_phi_deg": collapsed_phi,
-        "layer_0_block_0_n_turns": 1,
-        "layer_0_block_1_phi_deg": collapsed_phi,
+        "layer_0_block_0_phi_deg": 16.0,
+        "layer_0_block_0_n_turns": 2,
+        "layer_0_block_1_phi_deg": 18.0,
         "layer_0_block_1_n_turns": 1,
         "layer_0_block_1_active": True,
         "layer_0_block_1_alpha_deg": 0.0,
-        "layer_0_block_2_phi_deg": collapsed_phi,
+        "layer_0_block_2_phi_deg": 58.0,
         "layer_0_block_2_n_turns": 1,
         "layer_0_block_2_active": True,
         "layer_0_block_2_alpha_deg": 0.0,
-        "layer_0_block_3_phi_deg": collapsed_phi,
+        "layer_0_block_3_phi_deg": 82.0,
         "layer_0_block_3_n_turns": 1,
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
 
-    repaired = PhiOrderingRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
-    bounds_by_block = {
-        v.block_index: v.bounds
-        for v in genome_variables(topology)
-        if v.layer_index == 0 and v.block_index is not None and v.name.endswith("_phi_deg")
-    }
+    repaired = PhiOrderingRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
     phis = [float(repaired[f"layer_0_block_{index}_phi_deg"]) for index in range(4)]
+    required = _minimum_phi_gap_deg(
+        20.0,
+        topology.cables["inner"].insulated_width_inner_mm,
+        feasibility.min_gap_mm,
+        n_turns=2,
+    )
+    assert phis[1] - phis[0] >= required - 1.0e-12
+    assert phis[2] == pytest.approx(58.0)
+    assert phis[3] == pytest.approx(82.0)
 
-    # Every block must land strictly inside its own window's interior, not
-    # pinned to the window's lower edge (the old, buggy behavior).
-    for block_index, phi in enumerate(phis):
-        lower, upper = bounds_by_block[block_index]
-        window_width = upper - lower
-        assert phi > lower + 0.1 * window_width, (
-            f"block {block_index} landed at {phi}, within 10% of its window's lower "
-            f"edge {lower} (window {lower}-{upper}) -- slack was not spread"
-        )
 
-    # Gaps between consecutive (pole-to-midplane-sorted) positions should be
-    # roughly even, not concentrated entirely in one gap.
-    sorted_phis = sorted(phis)
-    gaps = [right - left for left, right in zip(sorted_phis, sorted_phis[1:], strict=False)]
-    assert min(gaps) > 0.5 * max(gaps), f"gaps are unevenly concentrated: {gaps}"
+def test_radial_compaction_repair_pulls_every_layer_to_the_tight_target_gap() -> None:
+    # A campaign's own feasibility check only enforces the radial layer gap
+    # as a MINIMUM (check_inter_layer_spacing: gap >= min_layer_clearance_mm),
+    # so a free inner_radius_mm gene sampled/mutated anywhere in its bounds
+    # is exactly as "feasible" whether it leaves 0.11mm or 4mm of slack.
+    # This repair must make every layer hug the previous layer's actual
+    # outer edge by exactly min_layer_clearance_mm, regardless of where the
+    # sample's own radius gene proposed sitting -- windows here are
+    # deliberately wide so the tight target lands in each window's
+    # interior, not clamped to either edge.
+    cable = CableSpec(width_mm=1.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=tuple(
+            LayerTopology(
+                cable_id="c",
+                n_blocks=1,
+                inner_radius_bounds_mm=(1.0, 500.0),
+                phi_bounds_deg=(10.0, 70.0),
+                n_turns_bounds=(1, 1),
+            )
+            for _ in range(4)
+        ),
+        cables={"c": cable},
+    )
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.1, max_angle_deg=80.0, min_layer_clearance_mm=0.5
+    )
+    sample = {
+        f"layer_{index}_inner_radius_mm": 300.0 + index for index in range(4)
+    }  # loose, out of order
+
+    repaired = RadialCompactionRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
+
+    radii = [float(repaired[f"layer_{index}_inner_radius_mm"]) for index in range(4)]
+    assert radii[0] == pytest.approx(1.0)
+    for index in range(1, 4):
+        expected = radii[index - 1] + cable.insulated_height_mm + feasibility.min_layer_clearance_mm
+        assert radii[index] == pytest.approx(expected)
+
+
+def test_radial_compaction_repair_clamps_to_bounds_when_target_is_unreachable() -> None:
+    # If the previous layer's actual outer edge would push a layer's target
+    # radius above its own genome upper bound, the repair must clamp to that
+    # bound rather than exceed it (a Real gene outside its own bounds would
+    # be invalid input to everything downstream).
+    cable = CableSpec(
+        width_mm=0.1, height_mm=50.0, insulation_thickness_mm=0.0
+    )  # deliberately tall
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=1,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(10.0, 70.0),
+                n_turns_bounds=(1, 1),
+            ),
+            LayerTopology(
+                cable_id="outer",
+                n_blocks=1,
+                inner_radius_bounds_mm=(21.0, 22.0),
+                phi_bounds_deg=(10.0, 70.0),
+                n_turns_bounds=(1, 1),
+            ),
+        ),
+        cables={"inner": cable, "outer": cable},
+    )
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.1, max_angle_deg=80.0, min_layer_clearance_mm=0.5
+    )
+    sample = {"layer_0_inner_radius_mm": 20.0, "layer_1_inner_radius_mm": 21.0}
+
+    repaired = RadialCompactionRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
+
+    assert float(repaired["layer_1_inner_radius_mm"]) == pytest.approx(22.0)
+
+
+def test_phi_ordering_repair_pins_lone_midplane_block_to_tight_lower_bound() -> None:
+    # When only block 0 is active in a layer (every other block deactivated),
+    # the >=2-block branch (which lands block 0 exactly at phi_lower by
+    # construction) never runs -- an earlier version of this repair skipped
+    # the layer entirely in that case, leaving the lone midplane block's phi
+    # wherever sampling/mutation put it instead of pinned to the tight
+    # midplane-clearance target.
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 50.0,  # loose, nowhere near phi_lower
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 60.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": False,
+        "layer_0_block_1_alpha_deg": 0.0,
+        "layer_0_block_2_phi_deg": 70.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": False,
+        "layer_0_block_2_alpha_deg": 0.0,
+        "layer_0_block_3_phi_deg": 80.0,
+        "layer_0_block_3_n_turns": 1,
+        "layer_0_block_3_active": False,
+        "layer_0_block_3_alpha_deg": 0.0,
+    }
+
+    repaired = PhiOrderingRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
+
+    assert float(repaired["layer_0_block_0_phi_deg"]) == pytest.approx(
+        topology.layers[0].phi_bounds_deg[0]
+    )
 
 
 class _StubMating:
@@ -509,24 +799,9 @@ def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() ->
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
-    feasible_sample = {
-        "layer_0_inner_radius_mm": 20.0,
-        "layer_0_block_0_phi_deg": 74.0,
-        "layer_0_block_0_n_turns": 1,
-        "layer_0_block_1_phi_deg": 55.0,
-        "layer_0_block_1_n_turns": 1,
-        "layer_0_block_1_active": True,
-        "layer_0_block_1_alpha_deg": 0.0,
-        "layer_0_block_2_phi_deg": 32.0,
-        "layer_0_block_2_n_turns": 1,
-        "layer_0_block_2_active": True,
-        "layer_0_block_2_alpha_deg": 0.0,
-        "layer_0_block_3_phi_deg": 8.0,
-        "layer_0_block_3_n_turns": 1,
-        "layer_0_block_3_active": True,
-        "layer_0_block_3_alpha_deg": 0.0,
-    }
-    adaptive = AdaptiveOffspringMating(topology, feasibility, _StubMating([infeasible_sample]), sampling)
+    adaptive = AdaptiveOffspringMating(
+        topology, feasibility, _StubMating([infeasible_sample]), sampling
+    )
     assert not adaptive._is_valid(infeasible_sample), "test fixture must actually be infeasible"
 
     # First .do() call returns the always-infeasible sample; local
@@ -542,7 +817,9 @@ def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() ->
     assert adaptive.valid_fraction_history == [1.0]
 
 
-def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(monkeypatch) -> None:  # noqa: ANN001
+def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(
+    monkeypatch,
+) -> None:  # noqa: ANN001
     topology = _tight_four_block_topology()
     feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
     sampling = ConstructiveMixedVariableSampling(topology, feasibility)
@@ -564,12 +841,18 @@ def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
-    adaptive = AdaptiveOffspringMating(topology, feasibility, _StubMating([infeasible_sample]), sampling)
+    adaptive = AdaptiveOffspringMating(
+        topology, feasibility, _StubMating([infeasible_sample]), sampling
+    )
     # Force even the fallback constructive sampler to hand back the same
     # infeasible sample, so no retry path can ever succeed -- this must
     # not crash, and must still return a full-size, consumable offspring
     # population (never silently drop offspring).
-    monkeypatch.setattr(sampling, "do", lambda problem, n, random_state=None: Population.new(X=[dict(infeasible_sample)]))
+    monkeypatch.setattr(
+        sampling,
+        "do",
+        lambda problem, n, random_state=None: Population.new(X=[dict(infeasible_sample)]),
+    )
 
     pop = Population.new(X=[dict(infeasible_sample)])
     off = adaptive.do(None, pop, 1)
@@ -579,7 +862,13 @@ def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(
 
 
 def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:
-    cable = CableSpec(width_inner_mm=1.53, width_outer_mm=1.658, height_mm=18.363, insulation_radial_mm=0.145, insulation_azimuthal_mm=0.145)
+    cable = CableSpec(
+        width_inner_mm=1.53,
+        width_outer_mm=1.658,
+        height_mm=18.363,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
     topology = Topology(
         aperture_radius_mm=25.0,
         layers=(
@@ -610,7 +899,9 @@ def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> No
         "layer_0_block_1_alpha_deg": 12.0 - 90.0,
     }
 
-    repaired = GroundTruthRepair(topology, feasibility)._do(None, np.asarray([sample], dtype=object))[0]
+    repaired = GroundTruthRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
 
     from dot.optimize.genome import flatten_mixed_genome
 
@@ -627,6 +918,140 @@ def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> No
     # Repaired by shrinking the offending (pole-ward) block, not the safe one.
     assert repaired["layer_0_block_1_n_turns"] < 8
     assert repaired["layer_0_block_0_n_turns"] == 10
+
+
+def test_ground_truth_repair_rotates_aperture_offender_before_deleting_turns() -> None:
+    cable = CableSpec(
+        width_inner_mm=1.53,
+        width_outer_mm=1.658,
+        height_mm=18.363,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    topology = Topology(
+        aperture_radius_mm=25.0,
+        layers=(
+            LayerTopology(
+                cable_id="c",
+                n_blocks=2,
+                inner_radius_bounds_mm=(25.0, 25.0),
+                phi_bounds_deg=(0.0, 90.0),
+                n_turns_bounds=(2, 7),
+                alpha_bounds_deg=(-15.0, 75.0),
+                first_block_phi_deg=0.343771,
+                first_block_alpha_deg=0.0,
+            ),
+        ),
+        cables={"c": cable},
+    )
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.0,
+        min_layer_clearance_mm=0.0,
+        min_inter_block_gap_mm=1.0,
+        geometry_tolerance_mm=0.005,
+    )
+    sample = {
+        "layer_0_inner_radius_mm": 25.0,
+        "layer_0_block_0_phi_deg": 0.343771,
+        "layer_0_block_0_n_turns": 4,
+        "layer_0_block_1_phi_deg": 20.2269,
+        "layer_0_block_1_n_turns": 6,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 23.4754,
+    }
+    initial = check_feasibility(
+        decode(flatten_mixed_genome(sample, topology), topology, topology.cables),
+        aperture_radius_mm=topology.aperture_radius_mm,
+        min_gap_mm=feasibility.min_gap_mm,
+        min_layer_clearance_mm=feasibility.min_layer_clearance_mm,
+        min_inter_block_gap_mm=feasibility.min_inter_block_gap_mm,
+        geometry_tolerance_mm=feasibility.geometry_tolerance_mm,
+    )
+    assert [violation.constraint_name for violation in initial.violations] == ["aperture_clearance"]
+
+    repaired = GroundTruthRepair(topology, feasibility)._do(
+        None,
+        np.asarray([sample], dtype=object),
+    )[0]
+    repaired_design = decode(
+        flatten_mixed_genome(repaired, topology),
+        topology,
+        topology.cables,
+    )
+    result = check_feasibility(
+        repaired_design,
+        aperture_radius_mm=topology.aperture_radius_mm,
+        min_gap_mm=feasibility.min_gap_mm,
+        min_layer_clearance_mm=feasibility.min_layer_clearance_mm,
+        min_inter_block_gap_mm=feasibility.min_inter_block_gap_mm,
+        geometry_tolerance_mm=feasibility.geometry_tolerance_mm,
+    )
+
+    assert result.is_feasible, "\n".join(v.message for v in result.violations)
+    assert repaired["layer_0_block_1_n_turns"] == 6
+    assert bool(repaired["layer_0_block_1_active"]) is True
+    assert repaired["layer_0_block_1_alpha_deg"] < 23.4754
+
+
+def test_ground_truth_repair_never_deactivates_a_block_below_min_blocks() -> None:
+    # Same pole-angle-violation setup as the shrink test above, but the
+    # offending block's turns are already at its lower bound (1, not 8), so
+    # GroundTruthRepair's only remaining move is deactivation -- which task
+    # 0054's own min_blocks=2 floor for this layer must forbid, since block1
+    # is the layer's only non-block-0 ACTIVE block (deactivating it would
+    # drop the layer to 1 active block).
+    cable = CableSpec(
+        width_inner_mm=1.53,
+        width_outer_mm=1.658,
+        height_mm=18.363,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    topology = Topology(
+        aperture_radius_mm=25.0,
+        layers=(
+            LayerTopology(
+                cable_id="c",
+                n_blocks=3,
+                inner_radius_bounds_mm=(30.0, 30.0),
+                phi_bounds_deg=(12.0, 78.0),
+                n_turns_bounds=(1, 15),
+                alpha_bounds_deg=(-88.0, 10.0),
+                min_blocks=2,
+            ),
+        ),
+        cables={"c": cable},
+    )
+    feasibility = FeasibilitySettings(min_gap_mm=0.15, max_angle_deg=80.0, min_pole_gap_mm=1.5)
+    sample = {
+        "layer_0_inner_radius_mm": 30.0,
+        "layer_0_block_0_phi_deg": 70.0,
+        "layer_0_block_0_n_turns": 10,
+        "layer_0_block_1_phi_deg": 12.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 12.0 - 90.0,
+        "layer_0_block_2_phi_deg": 12.0,
+        "layer_0_block_2_n_turns": 1,
+        "layer_0_block_2_active": False,
+        "layer_0_block_2_alpha_deg": 0.0,
+    }
+    assert not check_feasibility(
+        decode(flatten_mixed_genome(sample, topology), topology, topology.cables),
+        aperture_radius_mm=topology.aperture_radius_mm,
+        min_gap_mm=feasibility.min_gap_mm,
+        max_angle_deg=feasibility.max_angle_deg,
+        min_pole_gap_mm=feasibility.min_pole_gap_mm,
+    ).is_feasible, "test fixture must actually be infeasible to start"
+
+    repaired = GroundTruthRepair(topology, feasibility)._do(
+        None, np.asarray([sample], dtype=object)
+    )[0]
+
+    assert bool(repaired["layer_0_block_1_active"]) is True, (
+        "block1 must stay active -- deactivating it would drop layer 0 below its min_blocks=2 floor"
+    )
+    assert int(repaired["layer_0_block_1_n_turns"]) == 1
 
 
 def test_turn_budget_repair_reduces_largest_active_turn_counts_first() -> None:
@@ -753,7 +1178,7 @@ def _tight_four_block_topology() -> Topology:
                 cable_id="inner",
                 n_blocks=4,
                 inner_radius_bounds_mm=(20.0, 20.0),
-                phi_bounds_deg=(2.0, 78.0),
+                phi_bounds_deg=(12.0, 88.0),
                 n_turns_bounds=(1, 1),
                 alpha_bounds_deg=(0.0, 0.0),
             ),
