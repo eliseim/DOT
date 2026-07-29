@@ -12,7 +12,12 @@ from .objectives import (
     load_line_margin_objective,
     load_line_margin_by_block_detail,
 )
-from .operating_point import OperatingPoint, operating_point, scale_design_currents
+from .operating_point import (
+    OperatingPoint,
+    operating_point,
+    operating_point_at_current,
+    scale_design_currents,
+)
 
 __all__ = [
     "CERTIFICATION_FIDELITY",
@@ -31,5 +36,6 @@ __all__ = [
     "load_line_margin_objective",
     "load_line_margin_by_block_detail",
     "operating_point",
+    "operating_point_at_current",
     "scale_design_currents",
 ]

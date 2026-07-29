@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dot"
-version = "0.1.1"
+version = "1.0.0"
 description = "Autonomous 2D air-core superconducting dipole optimization and certification"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
     {name = "Mattia Elisei"},
 ]
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["accelerator", "dipole", "magnet", "optimization", "superconducting"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -40,9 +40,6 @@ dev = [
     "pytest",
     "ruff",
 ]
-roxie = [
-    "requests>=2.31",
-]
 [project.scripts]
 dot = "dot.cli:main"
 dot-gui = "dot.gui.target_synthesis_gui:main"
@@ -58,7 +55,8 @@ line-length = 100
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
 markers = [
-    "slow: convergence or high-fidelity benchmark tests not run in the default CI job",
+    "slow: convergence or extended numerical benchmark tests not run in the default CI job",
     "live_roxie: optional tests requiring a licensed local ROXIE installation",
 ]

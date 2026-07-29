@@ -25,16 +25,18 @@ htmlcov/
 
 # local campaign outputs and verification artefacts
 campaigns/
+output/
+results/
 verification_runs/
 tmp/
+*-20??????-??????/
 
 # licensed/reference documents used during local physics review
 *.pdf
+!DOT_CONCISE_GUIDE.pdf
 magnet_design_course_gupta/
 best_candidate_problems.png
 
-# local AI-orchestration follow-up notes are not public documentation
-docs/ai/**/CODEX_FOLLOWUP.md
-
-# local Claude Code session state, not project content
+# local agent/session state, not project content
+.agents/
 .claude/

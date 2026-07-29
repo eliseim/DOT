@@ -73,6 +73,9 @@ class _IndexedTurn:
     turn: TurnPolygon
 
 
+_Bounds = tuple[float, float, float, float]
+
+
 def check_aperture_clearance(
     design: DipoleDesign,
     aperture_radius_mm: float,
@@ -105,13 +108,14 @@ def check_inter_layer_spacing(
     min_clearance_mm: float = 0.1,
     tolerance_mm: float = DEFAULT_GEOMETRY_TOLERANCE_MM,
 ) -> list[Violation]:
-    """Check the specified radial spacer between consecutive layer mandrels.
+    """Check the radial spacer between consecutive layer mandrels.
 
-    For generated windings, the radial gap is the difference between nominal
-    layer radii after subtracting the inner layer cable's insulated radial
-    height. This matches how ROXIE layer radii and inter-layer spacers are
-    specified. Polygon collision remains an independent constraint. Hand-built
-    polygon fixtures without cable metadata use local polygon distance.
+    For generated windings this is the magnet-design radial-build convention:
+    outer-layer radius minus inner-layer radius minus the insulated radial
+    height of the inner cable. It is intentionally not the global Euclidean
+    distance between arbitrary corners of tilted blocks. Polygon overlap is
+    independently prohibited by :func:`check_turn_non_intersection`.
+    Hand-built polygon fixtures without cable metadata use local distance.
     """
 
     violations: list[Violation] = []
@@ -125,7 +129,6 @@ def check_inter_layer_spacing(
         non_empty_layers[1:],
         strict=False,
     ):
-
         inner_layer = design.layers[inner_layer_index]
         outer_layer = design.layers[outer_layer_index]
         radial_heights = tuple(
@@ -197,7 +200,7 @@ def check_layer_nesting(design: DipoleDesign) -> list[Violation]:
     check independent of radial spacing (:func:`check_inter_layer_spacing`).
     Take the inner layer's pole-most block's pole-side turn edge (the
     stacking direction confirmed, via live ROXIE, to point toward the pole
-    as turn index increases -- see task 0031), prolong it into an infinite
+    as turn index increases), prolong it into an infinite
     line, and require every vertex of the outer layer's turns to stay on
     the same side as the origin. A vertex crossing to the far side means
     the outer layer cannot physically nest over the inner layer's winding.
@@ -418,8 +421,16 @@ def check_turn_non_intersection(
 
     violations: list[Violation] = []
     turns = tuple(_iter_indexed_turns(design))
+    bounds = tuple(_polygon_bounds(indexed.turn.corners) for indexed in turns)
     for left_index, left in enumerate(turns):
-        for right in turns[left_index + 1 :]:
+        left_bounds = bounds[left_index]
+        for right_index in range(left_index + 1, len(turns)):
+            right = turns[right_index]
+            # Separated axis-aligned boxes cannot contain positively
+            # overlapping polygons. Possible contacts still use the exact
+            # SAT/depth kernels, so this broad phase changes no tolerance.
+            if not _bounds_can_overlap(left_bounds, bounds[right_index]):
+                continue
             if _convex_polygons_overlap(left.turn.corners, right.turn.corners):
                 overlap_depth = _convex_polygon_overlap_depth(left.turn.corners, right.turn.corners)
                 if overlap_depth <= tolerance_mm:
@@ -466,7 +477,7 @@ def check_inter_block_gap(
     between turns of different blocks within the same layer (turns in
     different layers are already governed by
     :func:`check_inter_layer_spacing`). See :func:`check_electrical_gap`
-    and :func:`check_wedge_gap` for dd's exact two-tier thresholds.
+    and :func:`check_wedge_gap` for the two clearance tiers.
     """
 
     return _inter_block_gap_violations(
@@ -475,13 +486,13 @@ def check_inter_block_gap(
 
 
 def check_electrical_gap(design: DipoleDesign, min_gap_mm: float = ELECTRICAL_GAP_MIN_MM) -> list[Violation]:
-    """dd's C7a: minimum electrical-insulation gap between adjacent blocks."""
+    """Minimum electrical-insulation gap between adjacent blocks."""
 
     return _inter_block_gap_violations(design, min_gap_mm, "electrical_gap")
 
 
 def check_wedge_gap(design: DipoleDesign, min_gap_mm: float = WEDGE_GAP_MIN_MM) -> list[Violation]:
-    """dd's C7b: minimum manufacturability wedge gap between adjacent blocks."""
+    """Minimum manufacturability wedge gap between adjacent blocks."""
 
     return _inter_block_gap_violations(design, min_gap_mm, "wedge_gap")
 
@@ -596,12 +607,28 @@ def inter_block_clearances(design: DipoleDesign) -> tuple[InterBlockClearance, .
     clearances: list[InterBlockClearance] = []
     for layer_index, layer in enumerate(design.layers):
         turns_by_block = [tuple(block.turns()) for block in layer.blocks]
+        bounds_by_block = [
+            tuple(_polygon_bounds(turn.corners) for turn in turns)
+            for turns in turns_by_block
+        ]
         for block_index, left_turns in enumerate(turns_by_block):
             for other_block_index in range(block_index + 1, len(turns_by_block)):
                 right_turns = turns_by_block[other_block_index]
+                left_bounds = bounds_by_block[block_index]
+                right_bounds = bounds_by_block[other_block_index]
                 closest: tuple[float, int, int] | None = None
                 for turn_index, left in enumerate(left_turns):
                     for other_turn_index, right in enumerate(right_turns):
+                        lower_bound = _bounds_distance_lower_bound(
+                            left_bounds[turn_index],
+                            right_bounds[other_turn_index],
+                        )
+                        if (
+                            closest is not None
+                            and closest[0] >= 0.0
+                            and lower_bound > closest[0]
+                        ):
+                            continue
                         if _convex_polygons_overlap(left.corners, right.corners):
                             distance = -_convex_polygon_overlap_depth(
                                 left.corners, right.corners
@@ -687,10 +714,16 @@ def check_feasibility(
         )
     )
     violations.extend(check_midplane_clearance(design, min_gap_mm, geometry_tolerance_mm))
-    if min_pole_gap_mm is not None:
-        violations.extend(
-            check_pole_clearance(design, min_pole_gap_mm, geometry_tolerance_mm)
+    # The field solver mirrors compact first-quadrant sources.  Even when the
+    # user has not requested an additional pole gap, x=0 is therefore a hard
+    # model-domain boundary and no cable polygon may cross it.
+    violations.extend(
+        check_pole_clearance(
+            design,
+            0.0 if min_pole_gap_mm is None else min_pole_gap_mm,
+            geometry_tolerance_mm,
         )
+    )
     if min_pole_turn_radius_mm is not None:
         violations.extend(
             check_first_layer_pole_turn_radius(
@@ -770,6 +803,31 @@ def _distance_origin_to_polygon(points: tuple[Point, ...]) -> float:
     if _point_in_convex_polygon(origin, points):
         return 0.0
     return min(_distance_point_to_segment(origin, start, end) for start, end in _edges(points))
+
+
+def _polygon_bounds(points: tuple[Point, ...]) -> _Bounds:
+    """Return ``(min_x, max_x, min_y, max_y)`` for an exact broad phase."""
+
+    x_values = tuple(point[0] for point in points)
+    y_values = tuple(point[1] for point in points)
+    return min(x_values), max(x_values), min(y_values), max(y_values)
+
+
+def _bounds_can_overlap(left: _Bounds, right: _Bounds) -> bool:
+    """Return whether two boxes can contain positive-area polygon overlap."""
+
+    return (
+        min(left[1], right[1]) - max(left[0], right[0]) > 0.0
+        and min(left[3], right[3]) - max(left[2], right[2]) > 0.0
+    )
+
+
+def _bounds_distance_lower_bound(left: _Bounds, right: _Bounds) -> float:
+    """Return a rigorous lower bound on the distance between two polygons."""
+
+    dx = max(left[0] - right[1], right[0] - left[1], 0.0)
+    dy = max(left[2] - right[3], right[2] - left[3], 0.0)
+    return math.hypot(dx, dy)
 
 
 def _distance_point_to_segment(point: Point, start: Point, end: Point) -> float:

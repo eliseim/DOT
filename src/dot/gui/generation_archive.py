@@ -1,6 +1,6 @@
-"""Persist per-generation best-candidate snapshots to disk (task 0053).
+"""Persist per-generation best-candidate snapshots to disk.
 
-The live GUI view (task 0052) shows the current best candidate while a
+The live GUI shows the current best candidate while a
 campaign runs, but nothing survives after the process exits or between
 generations -- there was no way to go back and inspect how a campaign's best
 candidate evolved. ``save_generation_snapshot`` writes one cross-section PNG
@@ -16,7 +16,11 @@ from pathlib import Path
 
 from dot.geometry import DipoleDesign
 from dot.geometry.constraints import first_layer_pole_turn_clearance_mm
-from dot.optimize.objectives import BlockMarginRecord, LayerMarginRecord
+from dot.optimize.objectives import (
+    BlockMarginRecord,
+    EvaluationFidelity,
+    LayerMarginRecord,
+)
 from dot.results import block_geometry_record, block_geometry_rows, inter_block_clearance_rows
 
 from .cross_section_plot import cross_section_figure
@@ -35,12 +39,13 @@ def save_generation_snapshot(
     harmonics: tuple[tuple[int, float, float], ...] = (),
     harmonic_targets: tuple[tuple[int, float], ...] = (),
     cable_labels: tuple[str, ...] = (),
+    evaluation_fidelity: EvaluationFidelity | None = None,
 ) -> Path:
     """Save one generation's best-candidate cross-section PNG and characteristics JSON.
 
     Returns the path to the written JSON file. ``cable_labels[i]`` (if given)
     annotates layer ``i`` in the per-layer margin breakdown, matching the
-    campaign script convention (task 0051).
+    campaign script convention.
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -61,9 +66,14 @@ def save_generation_snapshot(
     )
     target_by_order = dict(harmonic_targets)
     characteristics = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generation": generation,
         "total_generations": total_generations,
+        "evaluation_fidelity": (
+            asdict(evaluation_fidelity)
+            if evaluation_fidelity is not None
+            else None
+        ),
         "harmonic_units": harmonic_units,
         "harmonic_residual_units": harmonic_units,
         "harmonic_targets": {

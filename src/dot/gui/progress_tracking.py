@@ -1,10 +1,7 @@
-"""Live campaign progress tracking: ETA + generation history (task 0056).
+"""Live campaign progress tracking: ETA and generation history.
 
-dd's own GUI has an ETA/elapsed/candidates dashboard and a 3-panel
-convergence chart (target-box distance, harmonic, margin vs. evaluated-
-candidate index). This module is DOT's counterpart, adapted to what DOT
-actually has that dd doesn't: per-generation (not per-candidate-call) timing,
-and per-layer margin detail (task 0051) dd's dashboard never shows at all.
+The tracker is independent of Tkinter so timing and convergence history can
+be shared safely by the campaign worker and GUI.
 """
 
 from __future__ import annotations

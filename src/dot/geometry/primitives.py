@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .cable import CableSpec
 
@@ -137,7 +138,19 @@ class Block:
     inner_radius_mm: float
     current_a: float
 
+    @lru_cache(maxsize=4096)
     def turns(self) -> tuple[TurnPolygon, ...]:
+        """Return this immutable block's turns, reusing exact prior constructions.
+
+        Geometry feasibility deliberately applies several independent checks
+        to the same design.  Each check used to rebuild every turn polygon,
+        including all keystone frames and validation, even though ``Block``
+        and all of its inputs are frozen value objects.  A bounded, exact-key
+        cache removes that repeated work without rounding genes or changing
+        any geometric predicate.  The bound prevents a long optimization
+        campaign from retaining every block it has ever evaluated.
+        """
+
         _require_positive_int(self.n_turns, "n_turns")
         _require_finite_positive(self.inner_radius_mm, "inner_radius_mm")
         _require_finite(self.phi_deg, "phi_deg")

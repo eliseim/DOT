@@ -34,6 +34,7 @@ class EvaluationFidelity:
     name: str
     bore_filaments_per_axis: int
     peak_filaments_per_axis: int
+    bore_quadrature: str = "midpoint"
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -44,13 +45,22 @@ class EvaluationFidelity:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{field_name} must be a positive integer")
+        if self.bore_quadrature not in {"midpoint", "gauss-legendre"}:
+            raise ValueError(
+                "bore_quadrature must be 'midpoint' or 'gauss-legendre'"
+            )
 
 
 # A 6x6 near-field source grid has a repeatable quadrature-alignment bias for
 # CTH-like Rutherford turns: it overestimates the peak field by roughly 0.5 T
 # and understates a genuinely 25% load-line margin by more than two percentage
 # points. 8x8 removes that false margin barrier at modest additional cost.
-SEARCH_FIDELITY = EvaluationFidelity("search-v2", 3, 8)
+SEARCH_FIDELITY = EvaluationFidelity(
+    "search-v3-gauss",
+    3,
+    8,
+    bore_quadrature="gauss-legendre",
+)
 CERTIFICATION_FIDELITY = EvaluationFidelity("certify-v1", 12, 80)
 
 
@@ -72,7 +82,7 @@ class _IndexedTurn:
 
 @dataclass(frozen=True, slots=True)
 class LayerMarginRecord:
-    """Load-line margin detail for one layer (task 0051).
+    """Load-line margin detail for one layer.
 
     ``load_line_margin_objective`` computes exactly these values internally
     already, but only ever returns ``min(margin_percent for all layers)`` --
@@ -117,6 +127,7 @@ def harmonic_table(
     sources = _design_sources(
         design,
         3 if fidelity is None else fidelity.bore_filaments_per_axis,
+        "midpoint" if fidelity is None else fidelity.bore_quadrature,
     )
     coefficients = multipole_coefficients(sources, order=max_order, r_ref_mm=r_ref_mm)
     return tuple(
@@ -183,7 +194,7 @@ def field_quality_objective(
 def load_line_margin_objective(
     design: DipoleDesign,
     cable_specs_by_layer: object,
-    cadata_by_layer: tuple[LayerConductorData | None, ...],
+    cadata_by_layer: tuple[LayerConductorData, ...],
     temperature_k: float,
     fidelity: EvaluationFidelity | None = None,
 ) -> float:
@@ -201,12 +212,12 @@ def load_line_margin_objective(
 
 def load_line_margin_detail(
     design: DipoleDesign,
-    cadata_by_layer: tuple[LayerConductorData | None, ...],
+    cadata_by_layer: tuple[LayerConductorData, ...],
     temperature_k: float,
     *,
     fidelity: EvaluationFidelity | None = None,
 ) -> tuple[LayerMarginRecord, ...]:
-    """Return the full per-layer load-line margin breakdown (task 0051).
+    """Return the full per-layer load-line margin breakdown.
 
     ``load_line_margin_objective`` reduces this to a single
     ``min(margin_percent)`` for use as a pymoo objective; this function is
@@ -218,11 +229,7 @@ def load_line_margin_detail(
     distinguishes the two.
     """
 
-    evaluated_layers = tuple(
-        index for index, layer_data in enumerate(cadata_by_layer) if layer_data is not None
-    )
-    if not evaluated_layers:
-        raise ValueError("load-line margin requires conductor data for at least one layer")
+    evaluated_layers = _margin_layer_indices(design, cadata_by_layer)
     records: list[LayerMarginRecord] = []
     indexed_turns = _conductor_turns_by_layer(design)
     peak_axis = (
@@ -240,8 +247,6 @@ def load_line_margin_detail(
         if operating_current_a == 0.0:
             raise ValueError("operating current must be nonzero")
         layer_data = cadata_by_layer[layer_index]
-        if layer_data is None:
-            raise ValueError("missing conductor data for limiting layer")
         k_field_per_current = peak_field_t / operating_current_a
         short_sample_current_a = solve_short_sample_current(
             layer_data.remfit,
@@ -266,18 +271,14 @@ def load_line_margin_detail(
 
 def load_line_margin_by_block_detail(
     design: DipoleDesign,
-    cadata_by_layer: tuple[LayerConductorData | None, ...],
+    cadata_by_layer: tuple[LayerConductorData, ...],
     temperature_k: float,
     *,
     fidelity: EvaluationFidelity | None = None,
 ) -> tuple[BlockMarginRecord, ...]:
     """Return peak field and load-line margin for every active ROXIE block."""
 
-    evaluated_layers = tuple(
-        index for index, layer_data in enumerate(cadata_by_layer) if layer_data is not None
-    )
-    if not evaluated_layers:
-        raise ValueError("load-line margin requires conductor data for at least one layer")
+    evaluated_layers = _margin_layer_indices(design, cadata_by_layer)
     indexed_turns = _conductor_turns_by_layer(design)
     peak_axis = (
         PEAK_FIELD_FILAMENTS_PER_AXIS
@@ -309,8 +310,6 @@ def load_line_margin_by_block_detail(
         if operating_current_a == 0.0:
             raise ValueError("operating current must be nonzero")
         layer_data = cadata_by_layer[layer_index]
-        if layer_data is None:
-            continue
         k_field_per_current = peak_field_t / operating_current_a
         short_sample_current_a = solve_short_sample_current(
             layer_data.remfit,
@@ -340,11 +339,31 @@ def load_line_margin_by_block_detail(
     return tuple(records)
 
 
-def _design_sources(design: DipoleDesign, filaments_per_axis: int = 3):
+def _margin_layer_indices(
+    design: DipoleDesign,
+    cadata_by_layer: tuple[LayerConductorData, ...],
+) -> tuple[int, ...]:
+    if len(cadata_by_layer) != len(design.layers):
+        raise ValueError("load-line margin requires one conductor-data record per layer")
+    if any(layer_data is None for layer_data in cadata_by_layer):
+        raise ValueError("load-line margin requires supported conductor data for every layer")
+    return tuple(range(len(cadata_by_layer)))
+
+
+def _design_sources(
+    design: DipoleDesign,
+    filaments_per_axis: int = 3,
+    quadrature: str = "midpoint",
+):
     return tuple(
         source
         for turn in design.all_turns()
-        for source in place_line_current_sources(turn, n1=filaments_per_axis, n2=filaments_per_axis)
+        for source in place_line_current_sources(
+            turn,
+            n1=filaments_per_axis,
+            n2=filaments_per_axis,
+            quadrature=quadrature,
+        )
     )
 
 

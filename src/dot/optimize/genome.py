@@ -40,7 +40,7 @@ class LayerTopology:
 
     ``n_blocks`` is the maximum active-block count (a genome-size concept:
     it fixes how many block slots exist). ``min_blocks`` is a separate
-    *search-pressure* floor -- dd's own ``min_active_blocks_per_layer``
+    *search-pressure* floor. ``min_active_blocks_per_layer``
     (its topology-collapse review recommends >=2 in the harmonic-dominant
     inner layers "so wedge angles exist to cancel harmonics"). Sampling and
     repair honor it; it does not change the genome's shape.
@@ -63,6 +63,10 @@ class LayerTopology:
         _require_positive_int(self.n_blocks, "n_blocks")
         _require_ordered_float_bounds(self.inner_radius_bounds_mm, "inner_radius_bounds_mm")
         _require_ordered_float_bounds(self.phi_bounds_deg, "phi_bounds_deg")
+        if self.phi_bounds_deg[0] < 0.0 or self.phi_bounds_deg[1] > 90.0:
+            raise ValueError(
+                "phi_bounds_deg must stay within the compact first quadrant [0, 90]"
+            )
         _require_ordered_float_bounds(self.alpha_bounds_deg, "alpha_bounds_deg")
         lower, upper = self.n_turns_bounds
         _require_positive_int(lower, "n_turns_bounds lower")

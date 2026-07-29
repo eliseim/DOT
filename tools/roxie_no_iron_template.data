@@ -1,0 +1,146 @@
+VERSION 25.1.0.b1
+'DOT 2D coil-only parity template'
+'none'
+'dot_cables.cadata'
+'none'
+
+&OPTION
+  LEND=F         LWEDG=F        LTRANS=F       LQUENCH=F      LALGO=F        LQUENCH0D=F
+  LMIRIRON=F     LBEMFEM=F      LPSI=F         LSOLV=F        LIRON=F        LMORPH=F
+  LHMO=F         LHARD=F        LPOSTP=F       LPEAK=T        LINMARG=F      LMARG=T
+  LSELF=T        LMQE=F         LINDU=F        LEDDY=F        LSOLE=F        LFLUX=F
+  LFIELD3=F      LSELF3=F       LBRICK=F       LLEAD=F        LVRML=F        LOPERA=F
+  LOPER20=F      LANSYS=F       LRX2ANS=F      LANS2RX=F      LDXF=F         LMAP2D=F
+  LMAP3D=F       LEXPR=F        LFIL3D=F       LFIL2D=F       LCNC=F         LANSYSCN=F
+  LWEIRON=F      LCATIA=F       LEXEL=F        LQVOLT=F       LFORCE2D=F     LQUNPLOT=F
+  LGRAPHCSV=F    LAXIS=T        LIMAGX=F       LIMAGY=F       LRAEND=F       LMARKER=F
+  LROLER2=F      LROLERP=F      LIMAGZZ=F      LSUPP=F        LPERS=F        LTEDDY=F
+  LSTEP=F        LSKIPDPL=T     LIFF=F         LICCA=F        LICC=F         LICCIND=F
+  LITERNL=F      LTOPO=F        LQUEN3=F       LAYER=T        LEULER=T       LHEAD=T
+  LPLOT=F        LVERS52=T      LHARM=T        LMATRF=F       LF3LIN=F       LKVAL=F
+  LSKIPTPL=T
+  /
+
+GLOBAL2DOPTION 0
+
+GLOBAL3D 0
+
+BLOCK 1
+    1    1    1          30           5           0        5000    YELLONIN   2  20   0            0
+   no  type   nco       radius          phi        alpha      current   condname  n1  n2  imag         turn
+
+BLOCKOPTION 0
+
+BLOCK3D 0
+
+BLOCKOPTION3D 0
+
+LEAD 0
+
+BRICK 0
+
+IRONYOKEOPTIONS /
+      1
+  scale
+
+             0            0
+         inrad       reperm
+
+      1
+  symtype
+
+      3     2     1
+  yzplane zxplane xyplane
+
+      1     0     0
+   mode   div   sym
+
+IRONYOKE 0
+
+EXTRUSION 0
+
+PERMANENTMAG2 0
+
+PERMANENTMAG1 0
+
+LAYER 1
+      1     2     1 1 /
+     no  symm typexy blocks
+
+ALGO /
+      1
+   algo
+
+DESIGN 0
+
+EULER 0
+
+PEAK 0
+
+TIMETABLE2 0
+
+TIMETABLE1 0
+
+EDDY /
+      0
+   pers
+
+EDDYOPTIONS 0
+
+QUENCHG 0
+
+QUENCHEN 0
+
+QUENCHTM 0
+
+QUENCHP 0
+
+QUENCHS 0
+
+HARMONICTABLE 1
+      1     1            0            0            0            0      20.0000        2                      0
+     no  type            x            y           s1           s2         rref     bref                  field
+
+MATRF 1
+             0          150    30
+             0          150    30
+             0            0     0     0
+         start          end    no field
+
+LINEFIELD 0
+
+KVALUES 0
+
+HARMONICOPTION 0
+
+GRAPH 0
+
+GRAPHOPTION 0
+
+PLOT2D 0
+
+PLOT2DOPTION 0
+
+PLOT3D 0
+
+PLOT3DOPTION 0
+
+OBJECTIVE 0
+
+ANSYSOPTIONS /
+      0
+  scale
+
+      0
+  scale
+
+             0            0            0            0
+          ang1         ang2         offx         offy
+
+QUENCH0D /
+             0            0            0            0            0            0            0
+          qini        tempq         tque         leng         dtdt        deltm       currqm
+
+TDEDDY /
+      0
+  tseddy

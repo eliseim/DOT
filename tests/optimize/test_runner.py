@@ -22,11 +22,10 @@ from dot.optimize.genome import flatten_mixed_genome
 from dot.optimize.problem import (
     DipoleOptimizationProblem,
     FeasibilitySettings,
-    MarginEvaluationExclusion,
     OptimizationTargets,
 )
 from dot.optimize.runner import (
-    AdaptiveOffspringMating,
+    FeasibilityAwareMating,
     ConstructiveMixedVariableSampling,
     GroundTruthRepair,
     LayerNestingRepair,
@@ -35,11 +34,12 @@ from dot.optimize.runner import (
     RadialCompactionRepair,
     TurnBudgetRepair,
     _certify_candidate,
+    _assign_sector_turns,
     _mixed_variable_nsga2,
     _minimum_phi_gap_deg,
     _search_nondominated,
     ParetoCandidate,
-    refresh_population_admission,
+    best_generation_candidate,
     run_campaign,
 )
 
@@ -58,9 +58,7 @@ def test_search_archive_drops_em_equivalent_complexity_in_turn_then_block_order(
             objectives=(4.0, -25.0),
         )
 
-    archive = _search_nondominated(
-        [candidate((2, 1)), candidate((1, 1)), candidate((2,))]
-    )
+    archive = _search_nondominated([candidate((2, 1)), candidate((1, 1)), candidate((2,))])
 
     assert len(archive) == 1
     assert [block.n_turns for block in archive[0].design.layers[0].blocks] == [2]
@@ -129,40 +127,36 @@ def test_certification_uses_signed_harmonic_target_residual() -> None:
     assert certified.harmonic_targets == ((3, b3),)
 
 
-def test_refresh_population_admission_rescoring_reflects_current_threshold() -> None:
-    # admission_thresholds() anneals the harmonic threshold from a loose
-    # start (10x the final target) down to the final target as generations
-    # progress. An individual accepted as feasible under the loose,
-    # early-generation threshold must be correctly re-flagged infeasible
-    # once refresh_population_admission() re-scores it against a later,
-    # stricter generation's threshold -- otherwise it survives NSGA2's
-    # elitist selection forever on stale G (task 0042).
+def test_certification_enforces_minimum_and_exact_fixed_current() -> None:
     topology = _topology()
-    baseline = run_campaign(topology, _targets(), _feasibility(), pop_size=8, n_gen=3, seed=11)
-    assert baseline.candidates
-    genome = baseline.candidates[0].genome
-    raw_field_quality = baseline.candidates[0].objectives[0]
-    assert raw_field_quality > 0.0
-
-    total_generations = 10
-    target = raw_field_quality / 2.0
-    targets_with_harmonic = replace(_targets(), max_harmonic_units=target)
-    problem = DipoleOptimizationProblem(
-        topology, targets_with_harmonic, _feasibility(), total_generations=total_generations
+    feasibility = _feasibility()
+    baseline = run_campaign(
+        topology,
+        _targets(),
+        feasibility,
+        pop_size=8,
+        n_gen=3,
+        seed=9,
     )
+    candidate = baseline.candidates[0]
+    assert candidate.operating_current_a is not None
+    fixed_current_a = abs(candidate.operating_current_a)
 
-    problem.set_generation(1)
-    f1, g1 = problem.evaluate(genome, return_values_of=["F", "G"])
-    assert np.all(np.atleast_1d(g1) <= 0.0)
+    fixed_targets = replace(
+        _targets(),
+        min_current_a=fixed_current_a,
+        max_current_a=fixed_current_a,
+    )
+    fixed = _certify_candidate(candidate, topology, fixed_targets, feasibility)
 
-    pop = Population.new(X=np.atleast_2d(genome))
-    pop.set("F", np.atleast_2d(f1))
-    pop.set("G", np.atleast_2d(g1))
+    assert fixed is not None
+    assert fixed.operating_current_a == pytest.approx(fixed_current_a)
 
-    problem.set_generation(total_generations)
-    refresh_population_admission(problem, pop)
-
-    assert np.any(pop.get("G") > 0.0)
+    minimum_only_targets = replace(
+        _targets(),
+        min_current_a=fixed_current_a + 1.0,
+    )
+    assert _certify_candidate(candidate, topology, minimum_only_targets, feasibility) is None
 
 
 def test_layer_nesting_repair_shifts_outer_layer_until_nesting_clears() -> None:
@@ -206,7 +200,7 @@ def test_layer_nesting_enforced_end_to_end_does_not_collapse_the_population() ->
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(conductor_data(), conductor_data()),
-        temperature_k=0.0,
+        temperature_k=1.9,
     )
     feasibility = FeasibilitySettings(
         min_gap_mm=0.1,
@@ -290,21 +284,6 @@ def _design_violates_nesting(topology: Topology, sample: dict[str, float | int])
     return any(v.layer_index == 1 for v in check_layer_nesting(design))
 
 
-def test_run_campaign_with_adaptive_offspring_still_produces_candidates() -> None:
-    topology = _topology()
-    result = run_campaign(
-        topology,
-        _targets(),
-        _feasibility(),
-        pop_size=8,
-        n_gen=3,
-        seed=7,
-        adaptive_offspring=True,
-    )
-
-    assert result.candidates
-
-
 def test_run_campaign_with_parallel_workers_still_produces_candidates() -> None:
     topology = _topology()
     result = run_campaign(
@@ -361,38 +340,20 @@ def test_run_campaign_on_generation_callback_fires_every_generation_with_a_desig
         assert family_count is None or family_count >= 1
 
 
-def test_run_campaign_excludes_unsupported_layers_from_margin_result() -> None:
-    topology = _four_layer_topology()
-    targets = OptimizationTargets(
-        target_bore_field_t=0.01,
-        r_ref_mm=5.0,
-        max_order=4,
-        cadata_by_layer=(None, None, conductor_data(), conductor_data()),
-        temperature_k=0.0,
-        excluded_margin_layers=(
-            MarginEvaluationExclusion(
-                layer_index=0, reason="unsupported REMFIT type 3 for 'NB3SNMP'"
-            ),
-            MarginEvaluationExclusion(
-                layer_index=1, reason="unsupported REMFIT type 3 for 'NB3SNMP'"
-            ),
-        ),
-    )
+def test_live_generation_candidate_never_reports_penalty_as_physics() -> None:
+    topology = _topology()
+    genome = np.asarray([20.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0])
+    pop = Population.new(X=np.asarray([genome]))
+    pop.set("F", np.asarray([[1.0e12, 1.0e12]]))
+    pop.set("G", np.asarray([[1.0]]))
 
-    result = run_campaign(
-        topology,
-        targets,
-        _feasibility(),
-        pop_size=8,
-        n_gen=2,
-        seed=7,
-    )
+    found = best_generation_candidate(topology, pop, _targets())
 
-    assert result.candidates
-    assert [(item.layer_index, item.reason) for item in result.excluded_margin_layers] == [
-        (0, "unsupported REMFIT type 3 for 'NB3SNMP'"),
-        (1, "unsupported REMFIT type 3 for 'NB3SNMP'"),
-    ]
+    assert found is not None
+    design, objectives, margin = found
+    assert isinstance(design, DipoleDesign)
+    assert objectives == (None, None)
+    assert margin is None
 
 
 def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
@@ -437,11 +398,76 @@ def test_constructive_sampling_improves_initial_feasible_fraction() -> None:
     assert constructive_feasible > random_feasible
 
 
+def test_sector_turn_seeding_covers_balanced_and_weighted_topologies() -> None:
+    phi_variables = [
+        ("layer_0_block_0_phi_deg", 0, (0.0, 90.0)),
+        ("layer_0_block_1_phi_deg", 1, (0.0, 90.0)),
+    ]
+
+    assignments: dict[str, tuple[int, int]] = {}
+    for strategy in ("balanced", "midplane_weighted", "pole_weighted", "random_weighted"):
+        sample: dict[str, float | int] = {}
+        _assign_sector_turns(
+            sample,
+            0,
+            phi_variables,
+            (1, 20),
+            20,
+            strategy=strategy,
+            rng=np.random.default_rng(17),
+        )
+        assignments[strategy] = (
+            int(sample["layer_0_block_0_n_turns"]),
+            int(sample["layer_0_block_1_n_turns"]),
+        )
+
+    assert assignments["balanced"] == (10, 10)
+    assert assignments["midplane_weighted"][0] > assignments["midplane_weighted"][1]
+    assert assignments["pole_weighted"][0] < assignments["pole_weighted"][1]
+    assert all(sum(turns) == 20 for turns in assignments.values())
+
+
+def test_parallel_repair_matches_serial_sampling_exactly() -> None:
+    topology = _tight_four_block_topology()
+    feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
+    targets = OptimizationTargets(
+        target_bore_field_t=0.01,
+        r_ref_mm=5.0,
+        max_order=4,
+        cadata_by_layer=(conductor_data(),),
+        temperature_k=1.9,
+    )
+    serial_problem = DipoleOptimizationProblem(topology, targets, feasibility)
+    parallel_problem = DipoleOptimizationProblem(
+        topology,
+        targets,
+        feasibility,
+        n_workers=2,
+    )
+    try:
+        serial = ConstructiveMixedVariableSampling(topology, feasibility).do(
+            serial_problem,
+            16,
+            random_state=np.random.default_rng(27),
+        )
+        parallel = ConstructiveMixedVariableSampling(topology, feasibility).do(
+            parallel_problem,
+            16,
+            random_state=np.random.default_rng(27),
+        )
+    finally:
+        parallel_problem.close()
+
+    assert [candidate.X for candidate in parallel] == [
+        candidate.X for candidate in serial
+    ]
+
+
 def test_mixed_variable_sampling_and_mating_keep_turn_genes_integer() -> None:
     topology = _integer_topology()
     feasibility = _feasibility()
     problem = _problem_for(topology, feasibility)
-    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size=8)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size=8, targets=problem.targets)
     sampled = algorithm.initialization.sampling.do(
         problem,
         8,
@@ -777,7 +803,7 @@ class _StubMating:
         return Population.new(X=[dict(sample)])
 
 
-def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() -> None:
+def test_feasibility_aware_mating_retries_infeasible_offspring_until_valid() -> None:
     topology = _tight_four_block_topology()
     feasibility = FeasibilitySettings(min_gap_mm=0.1, max_angle_deg=90.0)
     sampling = ConstructiveMixedVariableSampling(topology, feasibility)
@@ -799,7 +825,7 @@ def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() ->
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
-    adaptive = AdaptiveOffspringMating(
+    adaptive = FeasibilityAwareMating(
         topology, feasibility, _StubMating([infeasible_sample]), sampling
     )
     assert not adaptive._is_valid(infeasible_sample), "test fixture must actually be infeasible"
@@ -817,7 +843,7 @@ def test_adaptive_offspring_mating_retries_infeasible_offspring_until_valid() ->
     assert adaptive.valid_fraction_history == [1.0]
 
 
-def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(
+def test_feasibility_aware_mating_degrades_gracefully_when_fallback_also_fails(
     monkeypatch,
 ) -> None:  # noqa: ANN001
     topology = _tight_four_block_topology()
@@ -841,7 +867,7 @@ def test_adaptive_offspring_mating_degrades_gracefully_when_fallback_also_fails(
         "layer_0_block_3_active": True,
         "layer_0_block_3_alpha_deg": 0.0,
     }
-    adaptive = AdaptiveOffspringMating(
+    adaptive = FeasibilityAwareMating(
         topology, feasibility, _StubMating([infeasible_sample]), sampling
     )
     # Force even the fallback constructive sampler to hand back the same
@@ -1131,26 +1157,6 @@ def _topology() -> Topology:
     )
 
 
-def _four_layer_topology() -> Topology:
-    cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
-    layers = tuple(
-        LayerTopology(
-            cable_id=f"layer-{index}",
-            n_blocks=1,
-            inner_radius_bounds_mm=(20.0 + index * 4.0, 20.5 + index * 4.0),
-            phi_bounds_deg=(10.0 + index * 15.0, 15.0 + index * 15.0),
-            n_turns_bounds=(1, 1),
-            alpha_bounds_deg=(-10.0, 70.0),
-        )
-        for index in range(4)
-    )
-    return Topology(
-        aperture_radius_mm=8.0,
-        layers=layers,
-        cables={f"layer-{index}": cable for index in range(4)},
-    )
-
-
 def _integer_topology() -> Topology:
     cable = CableSpec(width_mm=0.2, height_mm=0.2, insulation_thickness_mm=0.0)
     return Topology(
@@ -1223,7 +1229,7 @@ def _targets(
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(conductor_data(),),
-        temperature_k=0.0,
+        temperature_k=1.9,
         max_total_turns=max_total_turns,
         max_turns_per_layer=max_turns_per_layer,
     )
@@ -1242,7 +1248,7 @@ def _problem_for(topology: Topology, feasibility: FeasibilitySettings):
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=cadata_by_layer,
-        temperature_k=0.0,
+        temperature_k=1.9,
     )
     return DipoleOptimizationProblem(topology, targets, feasibility)
 

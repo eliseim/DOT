@@ -2,26 +2,36 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import math
 import os
+import platform
 import queue
 import re
+import shutil
+import sys
 import time
 import tkinter as tk
+import tkinter.font as tkfont
+from dataclasses import asdict
 from datetime import datetime
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from dot import __version__
 from dot.acceleration import jit_status, recommended_process_workers
 from dot.conductors import conservative_maximum_current_advice, parse_cadata_text
 from dot.conductors.cadata import ConductorResolution, resolve_conductor
 from dot.geometry import CableSpec, TurnPolygon, midplane_anchors_from_gaps
 from dot.geometry.constraints import first_layer_pole_turn_clearance_mm
 from dot.optimize import LayerConductorData, LayerTopology, Topology
-from dot.optimize.problem import FeasibilitySettings, MarginEvaluationExclusion, OptimizationTargets
+from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
 from dot.physics import field_at, place_line_current_sources
 from dot.results import (
     best_candidate_index,
@@ -38,7 +48,7 @@ from .generation_archive import save_generation_snapshot
 from .progress_tracking import format_duration
 from .tooltip import attach_tooltip
 
-# task 0057: plain-language help text for every parameter a user can type
+# Plain-language help text for every parameter a user can type.
 # into this GUI, shown as a hover tooltip on its label. Grounded in DOT's
 # native angle convention (phi_deg=0 at the midplane / phi_deg=90 at the pole)
 # so the tooltip text
@@ -64,9 +74,9 @@ PARAMETER_HELP: dict[str, str] = {
         "geometric clearances."
     ),
     "reference_radius_mm": (
-        "Radius (mm) at which normalized multipoles are specified. This is not the bore "
-        "radius. A common accelerator-magnet convention is two-thirds of the aperture "
-        "radius; the LHC MB uses 17 mm for its 28 mm aperture radius."
+        "Radius (mm) at which normalized multipoles are specified. By default DOT keeps "
+        "it equal to two-thirds of the aperture radius, rounded to 0.001 mm. Clear the "
+        "automatic check box to enter a project-specific value."
     ),
     "max_harmonic_order": (
         "Highest normal harmonic included in target synthesis. DOT controls the allowed "
@@ -83,12 +93,15 @@ PARAMETER_HELP: dict[str, str] = {
         "calculation. Typically 1.9K (superfluid helium) for Nb3Sn/NbTi accelerator magnets."
     ),
     "layer_cadata_path": (
-        "Path to a .cadata file with this layer's conductor's strand/cable/critical-"
-        "current-fit parameters. Required to compute load-line margin for this layer."
+        "Path to the .cadata file for this layer. A file is required for every layer and "
+        "must contain the selected CONDUCTOR plus its linked cable, strand, insulation, "
+        "filament, and REMFIT records."
     ),
     "layer_conductor_name": (
-        "The conductor's name as it appears in the selected .cadata file (e.g. 'CTH_HF'). "
-        "Must match an entry in that file exactly."
+        "Select the exact, case-sensitive CONDUCTOR name from this layer's .cadata file. "
+        "After the file is selected, the drop-down lists only conductors whose complete "
+        "record chain resolves to a DOT-supported critical-current fit: REMFIT type 1 "
+        "(Bottura Nb-Ti) or type 11 (CERN high-field Nb3Sn)."
     ),
     "layer_n_blocks": (
         "Maximum number of azimuthal blocks the search may use in this layer. Each block is "
@@ -129,8 +142,10 @@ PARAMETER_HELP: dict[str, str] = {
         "orientation fixed and optimizes only the block's number of turns."
     ),
     "layer_radial_gap_mm": (
-        "Physical radial gap from the outer x-coordinate of the previous layer's first "
-        "insulated turn. Layer 1 is fixed directly on the aperture and ignores this value."
+        "Midplane radial-build gap from the outer x-coordinate of the previous layer's "
+        "first insulated turn to this layer's first-turn anchor. It is a mandrel/anchor "
+        "spacing, not the global closest-corner distance between tilted blocks; DOT "
+        "independently rejects polygon overlap. Layer 1 is fixed directly on the aperture."
     ),
     "layer_azimuthal_gap_mm": (
         "One-sided midplane gap in mm. DOT derives the first-block angle as "
@@ -148,8 +163,8 @@ PARAMETER_HELP: dict[str, str] = {
         "insulation clearance, not a design safety margin."
     ),
     "min_layer_clearance_mm": (
-        "Minimum radial clearance (mm) required between adjacent layers, accounting for "
-        "structural and insulation material between radial shells."
+        "Nominal radial-build spacer (mm) between adjacent layer mandrels after subtracting "
+        "the inner cable's insulated radial height. It is not a global closest-corner gap."
     ),
     "min_inter_block_gap_mm": (
         "Legacy all-layer inter-block clearance. New GUI configurations store one explicit "
@@ -164,11 +179,17 @@ PARAMETER_HELP: dict[str, str] = {
         "Numerical geometry tolerance (mm) used only to classify near-contact. It does not "
         "replace an engineering clearance requirement."
     ),
+    "layer_nesting": (
+        "Layer nesting is a conservative windability rule between adjacent layers. DOT "
+        "takes the pole-most turn of the inner layer, prolongs both its pole-side and lower "
+        "long edges as boundary lines, and requires every vertex of every outer-layer turn "
+        "to remain on the aperture side of both lines. This prevents an outer layer from "
+        "crossing the winding envelope even when the cable polygons do not collide."
+    ),
     "max_harmonic": (
         "Field-quality acceptance target: the largest allowed residual between each normal "
         "multipole and its Advanced-tab target (in units of 1e-4 of the main dipole field), "
-        "evaluated at the reference radius "
-        "(2/3 of the aperture radius). Lower is purer field; accelerator magnets typically "
+        "evaluated at the declared reference radius. Lower is purer field; accelerator magnets typically "
         "target a few units."
     ),
     "harmonic_target": (
@@ -186,7 +207,12 @@ PARAMETER_HELP: dict[str, str] = {
     "max_current_a": (
         "Upper bound (A) on the single global operating current DOT may use to reach the "
         "target bore field. A tighter cap forces the search to use more turns per ampere to "
-        "reach the same field."
+        "reach the same field. Set it equal to the minimum current to request fixed-current mode."
+    ),
+    "min_current_a": (
+        "Optional lower bound (A) on the global operating current. If minimum and maximum "
+        "are equal, DOT applies that exact series current and searches for a geometry whose "
+        "bore field matches the target within the 0.01% fixed-current numerical tolerance."
     ),
     "current_advice": (
         "Layer-1 conductor-based upper bound obtained by assuming the bore field is the "
@@ -206,11 +232,6 @@ PARAMETER_HELP: dict[str, str] = {
     "seed": (
         "Random seed for the search. Leave blank for a different random outcome each run; "
         "set a fixed integer for a reproducible run (same seed + same inputs = same result)."
-    ),
-    "pareto_search": (
-        "Keep harmonic quality and load-line margin as simultaneous Pareto objectives during "
-        "the global search, and apply the requested limits only during fixed-fidelity final "
-        "certification. Recommended for new magnets because it preserves both trade-off branches."
     ),
     "parallel_evaluations": (
         "Optional process parallelism for independent candidate physics evaluations. DOT leaves "
@@ -233,12 +254,19 @@ DEFAULT_OUTPUT_DIR = str(Path.cwd())
 # are added.  Custom preserves expert control without making population and
 # generation counts the first decision a new user has to make.
 NSGA2_PRESETS: dict[str, tuple[int, int] | None] = {
-    "Quick exploration": (64, 40),
-    "Design search (recommended)": (160, 100),
-    "Intensive search": (300, 200),
+    "Quick exploration": (160, 80),
+    "Design search (recommended)": (480, 200),
+    "Intensive search": (1000, 300),
     "Custom": None,
 }
 DEFAULT_NSGA2_PRESET = "Design search (recommended)"
+
+LAYER_TOPOLOGY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Min blocks", "min_blocks"),
+    ("Max blocks", "n_blocks"),
+    ("Min Turns", "turn_min"),
+    ("Max Turns", "turn_max"),
+)
 
 DEFAULT_STATE: dict[str, Any] = {
     "geometry_angle_convention": "native-midplane-zero",
@@ -247,12 +275,14 @@ DEFAULT_STATE: dict[str, Any] = {
     "target_bore_field_t": 0.02,
     "aperture_radius_mm": 8.0,
     "n_layers": 1,
-    "temperature_k": 0.0,
-    "reference_radius_mm": 5.3333333333,
+    "temperature_k": 1.9,
+    "reference_radius_mm": 5.333,
+    "auto_reference_radius": True,
     "max_harmonic_order": 11,
     "acceptance": {
         "max_harmonic_units": 5.0,
         "min_margin_percent": 10.0,
+        "min_current_a": None,
         "max_current_a": DEFAULT_MAX_CURRENT_A,
         "harmonic_targets": {},
     },
@@ -261,7 +291,6 @@ DEFAULT_STATE: dict[str, Any] = {
         "pop_size": NSGA2_PRESETS[DEFAULT_NSGA2_PRESET][0],
         "n_gen": NSGA2_PRESETS[DEFAULT_NSGA2_PRESET][1],
         "seed": 7,
-        "pareto_search": True,
         "parallel_evaluations": False,
     },
     "feasibility": {
@@ -292,25 +321,52 @@ DEFAULT_STATE: dict[str, Any] = {
 }
 
 
+def _initial_window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
+    """Return a useful initial size without exceeding the available display."""
+
+    available_width = screen_width - 80 if screen_width > 880 else screen_width
+    available_height = screen_height - 80 if screen_height > 680 else screen_height
+    width = min(1680, max(640, available_width), screen_width)
+    height = min(1000, max(560, available_height), screen_height)
+    return width, height
+
+
+def _initial_controls_width(total_width: int) -> int:
+    """Choose a readable control-pane width while protecting the plots."""
+
+    if total_width <= 0:
+        return 560
+    preferred = min(620, max(460, round(total_width * 0.37)))
+    return max(380, min(preferred, total_width - 700)) if total_width >= 1080 else 380
+
+
 class App(tk.Tk):
     """Graphical interface for the Dipole Optimization Tool."""
 
     def __init__(self) -> None:
         super().__init__()
         self.title("DOT - Dipole Optimization Tool")
-        self.geometry("1560x860")
-        self.minsize(980, 700)
+        window_width, window_height = _initial_window_size(
+            self.winfo_screenwidth(), self.winfo_screenheight()
+        )
+        self.geometry(f"{window_width}x{window_height}")
+        self.minsize(min(1080, window_width), min(640, window_height))
 
         self.runner = CampaignRunner()
         self.layer_vars: list[dict[str, tk.StringVar]] = []
+        self.conductor_widgets: list[ttk.Combobox] = []
+        self.cadata_browse_buttons: list[ttk.Button] = []
         self.feasibility_settings = dict(DEFAULT_STATE["feasibility"])
         self.plot_canvas: FigureCanvasTkAgg | None = None
+        self.plot_placeholder: ttk.Label | None = None
+        self.start_button_font: tkfont.Font | None = None
 
         self.campaign_name_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
         self.target_field_var = tk.StringVar()
         self.aperture_var = tk.StringVar()
         self.reference_radius_var = tk.StringVar()
+        self.auto_reference_radius_var = tk.BooleanVar(value=True)
         self.max_harmonic_order_var = tk.StringVar()
         self.n_layers_var = tk.IntVar()
         self.temperature_var = tk.StringVar()
@@ -322,6 +378,7 @@ class App(tk.Tk):
         self.enforce_layer_nesting_var = tk.BooleanVar(value=True)
         self.max_harmonic_var = tk.StringVar()
         self.min_margin_var = tk.StringVar()
+        self.min_current_var = tk.StringVar()
         self.max_current_var = tk.StringVar()
         self.harmonic_target_vars: dict[int, tk.StringVar] = {}
         self.harmonic_targets_frame: ttk.Frame | None = None
@@ -330,12 +387,12 @@ class App(tk.Tk):
         self.pop_size_var = tk.StringVar()
         self.n_gen_var = tk.StringVar()
         self.seed_var = tk.StringVar()
-        self.pareto_search_var = tk.BooleanVar(value=True)
         self.parallel_evaluations_var = tk.BooleanVar(value=False)
+        self.acceleration_status_var = tk.StringVar(value=jit_status())
         self.progress_var = tk.StringVar(value="Idle")
         self.result_var = tk.StringVar(value="No campaign has been run.")
         self.result_location_var = tk.StringVar(value="Results folder: --")
-        # task 0056: live progress dashboard.
+        # Live progress dashboard.
         self.elapsed_var = tk.StringVar(value="Elapsed: --:--")
         self.eta_var = tk.StringVar(value="ETA: --:--")
         self.best_summary_var = tk.StringVar(value="Best so far: --")
@@ -361,9 +418,13 @@ class App(tk.Tk):
         self._eta_at_event: float | None = None
         self._eta_event_time: float | None = None
         self._last_targets: OptimizationTargets | None = None
+        self._active_run_state: dict[str, Any] | None = None
+        self._close_pending = False
 
         self._build()
         self._apply_state(DEFAULT_STATE)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after_idle(self._position_initial_sash)
 
     def _build(self) -> None:
         outer = ttk.Frame(self, padding=10)
@@ -375,12 +436,17 @@ class App(tk.Tk):
 
         toolbar = ttk.Frame(outer)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        toolbar.columnconfigure(2, weight=1)
         ttk.Button(toolbar, text="Load Configuration", command=self._load_config).grid(
             row=0, column=0, padx=(0, 4)
         )
         ttk.Button(toolbar, text="Save Configuration", command=self._save_config).grid(
             row=0, column=1
         )
+        ttk.Label(
+            toolbar,
+            textvariable=self.acceleration_status_var,
+        ).grid(row=0, column=2, sticky="e", padx=(12, 0))
 
         controls_background = ttk.Style(self).lookup("TFrame", "background") or self.cget(
             "background"
@@ -408,7 +474,7 @@ class App(tk.Tk):
 
         controls_canvas = tk.Canvas(
             controls_panel,
-            width=520,
+            width=560,
             highlightthickness=0,
             borderwidth=0,
             background=controls_background,
@@ -445,13 +511,13 @@ class App(tk.Tk):
         self.bind_all("<Button-4>", self._scroll_controls, add="+")
         self.bind_all("<Button-5>", self._scroll_controls, add="+")
         output = ttk.Frame(main_paned_window, padding=(6, 0, 0, 0))
-        output.columnconfigure(0, weight=1)
-        output.columnconfigure(1, weight=1)
+        output.columnconfigure(0, weight=1, uniform="live-output")
+        output.columnconfigure(1, weight=1, uniform="live-output")
         output.rowconfigure(2, weight=1)
         main_paned_window.add(
             controls_panel,
-            minsize=340,
-            width=520,
+            minsize=380,
+            width=560,
             stretch="never",
         )
         main_paned_window.add(
@@ -468,6 +534,18 @@ class App(tk.Tk):
         self._build_nsga(controls)
         self._build_run_controls(controls)
         self._build_output(output)
+
+    def _position_initial_sash(self) -> None:
+        """Balance readable controls with persistent side-by-side live plots."""
+
+        paned = self.main_paned_window
+        if paned is None:
+            return
+        total_width = paned.winfo_width()
+        if total_width <= 1:
+            self.after(100, self._position_initial_sash)
+            return
+        paned.sash_place(0, _initial_controls_width(total_width), 0)
 
     def _scroll_controls(self, event: tk.Event) -> str | None:
         """Scroll the parameter column when the pointer is over that column."""
@@ -513,16 +591,26 @@ class App(tk.Tk):
     def _build_physics(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Magnet Physics", padding=8)
         frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        frame.columnconfigure(1, weight=1)
         self._entry(frame, "Target bore field [T]", self.target_field_var, 0, "target_field_t")
         self._entry(frame, "Aperture radius [mm]", self.aperture_var, 1, "aperture_radius_mm")
-        self._entry(
+        self.reference_radius_entry = self._entry(
             frame, "Reference radius [mm]", self.reference_radius_var, 2, "reference_radius_mm"
         )
+        automatic_reference = ttk.Checkbutton(
+            frame,
+            text="2/3 aperture (auto)",
+            variable=self.auto_reference_radius_var,
+            command=self._on_reference_mode_changed,
+        )
+        automatic_reference.grid(row=3, column=0, columnspan=2, sticky="w", pady=(1, 3))
+        attach_tooltip(automatic_reference, PARAMETER_HELP["reference_radius_mm"])
+        self.aperture_var.trace_add("write", lambda *_args: self._sync_reference_radius())
         self._entry(
-            frame, "Max harmonic order", self.max_harmonic_order_var, 3, "max_harmonic_order"
+            frame, "Max harmonic order", self.max_harmonic_order_var, 4, "max_harmonic_order"
         )
         layers_label = ttk.Label(frame, text="Layers")
-        layers_label.grid(row=4, column=0, sticky="w", pady=2)
+        layers_label.grid(row=5, column=0, sticky="w", pady=2)
         attach_tooltip(layers_label, PARAMETER_HELP["n_layers"])
         layers = ttk.Spinbox(
             frame,
@@ -532,18 +620,57 @@ class App(tk.Tk):
             width=8,
             command=self._sync_layer_rows,
         )
-        layers.grid(row=4, column=1, sticky="ew", pady=2)
+        layers.grid(row=5, column=1, sticky="ew", pady=2)
         self.n_layers_var.trace_add("write", lambda *_: self._sync_layer_rows())
-        self._entry(frame, "Temperature [K]", self.temperature_var, 5, "temperature_k")
+        self._entry(frame, "Temperature [K]", self.temperature_var, 6, "temperature_k")
+
+    def _configure_reference_entry(self) -> None:
+        entry = self.__dict__.get("reference_radius_entry")
+        if entry is not None:
+            entry.configure(state="readonly" if self.auto_reference_radius_var.get() else "normal")
+
+    def _sync_reference_radius(self) -> None:
+        if self.auto_reference_radius_var.get():
+            try:
+                aperture_radius_mm = float(self.aperture_var.get())
+            except (tk.TclError, ValueError):
+                self._configure_reference_entry()
+                return
+            if math.isfinite(aperture_radius_mm) and aperture_radius_mm > 0.0:
+                self.reference_radius_var.set(
+                    f"{_two_thirds_reference_radius(aperture_radius_mm):.3f}"
+                )
+        self._configure_reference_entry()
+
+    def _on_reference_mode_changed(self) -> None:
+        self._sync_reference_radius()
 
     def _build_layers(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Per-Layer Topology", padding=8)
         frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        self.layers_frame = frame
+        instruction = ttk.Label(
+            frame,
+            text=(
+                "Required: one .cadata file per layer. Choose the exact, case-sensitive "
+                "CONDUCTOR name from the filtered list. Only conductors linked to a "
+                "supported critical-current fit are shown.\n"
+                "Load-line fits supported: REMFIT type 1 (Bottura Nb-Ti) and type 11 "
+                "(CERN high-field Nb3Sn). Types 2-10 are not supported."
+            ),
+            justify="left",
+            wraplength=350,
+        )
+        instruction.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        attach_tooltip(instruction, PARAMETER_HELP["layer_conductor_name"])
+        rows = ttk.Frame(frame)
+        rows.grid(row=1, column=0, sticky="ew")
+        rows.columnconfigure(0, weight=1)
+        self.layers_frame = rows
 
     def _build_geometry(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Geometry / Manufacturability", padding=8)
         frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        frame.columnconfigure(1, weight=1)
         self._entry(
             frame,
             "Layer 1 min pole-turn radius [mm]",
@@ -558,11 +685,24 @@ class App(tk.Tk):
             1,
             "geometry_tolerance_mm",
         )
-        ttk.Checkbutton(
+        nesting = ttk.Checkbutton(
             frame,
             text="Enforce layer nesting",
             variable=self.enforce_layer_nesting_var,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        )
+        nesting.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 1))
+        attach_tooltip(nesting, PARAMETER_HELP["layer_nesting"])
+        nesting_explanation = ttk.Label(
+            frame,
+            text=(
+                "Nesting keeps each outer layer inside the conservative winding envelope "
+                "defined by prolonging both long edges of the preceding layer's pole-most turn."
+            ),
+            justify="left",
+            wraplength=350,
+        )
+        nesting_explanation.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        attach_tooltip(nesting_explanation, PARAMETER_HELP["layer_nesting"])
 
     def _build_acceptance(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Acceptance Targets", padding=8)
@@ -585,20 +725,21 @@ class App(tk.Tk):
             "max_harmonic",
         )
         self._entry(basic, "Min load-line margin [%]", self.min_margin_var, 1, "min_margin")
-        self._entry(basic, "Max current [A]", self.max_current_var, 2, "max_current_a")
+        self._entry(basic, "Min current [A]", self.min_current_var, 2, "min_current_a")
+        self._entry(basic, "Max current [A]", self.max_current_var, 3, "max_current_a")
         advice_label = ttk.Label(
             basic,
             textvariable=self.current_advice_var,
             wraplength=330,
             justify="left",
         )
-        advice_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        advice_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
         attach_tooltip(advice_label, PARAMETER_HELP["current_advice"])
         ttk.Button(
             basic,
             text="Refresh current advice",
             command=self._update_current_advice,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 2))
 
         ttk.Label(
             advanced,
@@ -660,13 +801,6 @@ class App(tk.Tk):
         )
         self.n_gen_entry = self._entry(frame, "Generations", self.n_gen_var, 2, "n_gen")
         self._entry(frame, "Seed", self.seed_var, 3, "seed")
-        pareto = ttk.Checkbutton(
-            frame,
-            text="Pareto search (recommended)",
-            variable=self.pareto_search_var,
-        )
-        pareto.grid(row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
-        attach_tooltip(pareto, PARAMETER_HELP["pareto_search"])
         worker_count = recommended_process_workers()
         parallel = ttk.Checkbutton(
             frame,
@@ -674,7 +808,7 @@ class App(tk.Tk):
             variable=self.parallel_evaluations_var,
             state="normal" if worker_count > 1 else "disabled",
         )
-        parallel.grid(row=5, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        parallel.grid(row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
         attach_tooltip(parallel, PARAMETER_HELP["parallel_evaluations"])
 
     def _on_search_preset(self, _event: tk.Event | None = None) -> None:
@@ -704,7 +838,26 @@ class App(tk.Tk):
         frame.columnconfigure(0, weight=1)
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=2, sticky="ew")
-        self.run_button = ttk.Button(buttons, text="Run Campaign", command=self._run_campaign)
+        default_font = tkfont.nametofont("TkDefaultFont")
+        self.start_button_font = default_font.copy()
+        default_size = int(default_font.cget("size"))
+        self.start_button_font.configure(
+            size=default_size + 1 if default_size >= 0 else default_size - 1,
+            weight="bold",
+        )
+        # A classic Tk button is intentional here: native ttk themes may ignore
+        # a requested foreground colour, while this keeps the primary action
+        # visibly red on every supported Windows theme.
+        self.run_button = tk.Button(
+            buttons,
+            text="Start Campaign",
+            command=self._run_campaign,
+            foreground="#B91C1C",
+            activeforeground="#7F1D1D",
+            font=self.start_button_font,
+            padx=10,
+            pady=3,
+        )
         self.run_button.grid(row=0, column=0, padx=(0, 4))
         self.stop_button = ttk.Button(
             buttons, text="Stop", command=self._request_stop, state="disabled"
@@ -716,7 +869,7 @@ class App(tk.Tk):
         ttk.Label(frame, textvariable=self.progress_var).grid(
             row=2, column=0, sticky="w", pady=(2, 2)
         )
-        # task 0056: elapsed/ETA readout, next to the progress bar's text.
+        # Elapsed/ETA readout next to the progress bar's text.
         timing_row = ttk.Frame(frame)
         timing_row.grid(row=3, column=0, sticky="w", pady=(0, 2))
         ttk.Label(timing_row, textvariable=self.elapsed_var).grid(
@@ -839,7 +992,7 @@ class App(tk.Tk):
         ax_harmonic = fig.add_subplot(312, sharex=ax_margin)
         ax_turns = fig.add_subplot(313, sharex=ax_margin)
         ax_margin.set_ylabel("Margin [%]")
-        ax_margin.set_title("Convergence (best so far)")
+        ax_margin.set_title("Selected candidate")
         ax_harmonic.set_ylabel("Worst |bn-target|\n[units]")
         ax_turns.set_ylabel("Turns")
         ax_turns.set_xlabel("Generation")
@@ -875,6 +1028,8 @@ class App(tk.Tk):
         while len(self.layer_vars) < n_layers:
             self.layer_vars.append(self._default_layer_vars(len(self.layer_vars)))
         self.layer_vars = self.layer_vars[:n_layers]
+        self.conductor_widgets = []
+        self.cadata_browse_buttons = []
         for child in self.layers_frame.winfo_children():
             child.destroy()
         for index, variables in enumerate(self.layer_vars):
@@ -902,49 +1057,71 @@ class App(tk.Tk):
 
     def _layer_row(self, index: int, variables: dict[str, tk.StringVar]) -> None:
         variables.setdefault("conductor_name", tk.StringVar(value=""))
-        frame = ttk.Frame(self.layers_frame)
+        frame = ttk.LabelFrame(self.layers_frame, text=f"Layer {index + 1}", padding=6)
         frame.grid(row=index, column=0, sticky="ew", pady=(0, 8))
-        cadata_label = ttk.Label(frame, text=f"Layer {index + 1}")
-        cadata_label.grid(row=0, column=0, sticky="w")
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+
+        file_row = ttk.Frame(frame)
+        file_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        file_row.columnconfigure(1, weight=1)
+        cadata_label = ttk.Label(file_row, text="Cable data (.cadata)")
+        cadata_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
         attach_tooltip(cadata_label, PARAMETER_HELP["layer_cadata_path"])
-        ttk.Entry(frame, textvariable=variables["cadata_path"], width=32).grid(
-            row=0, column=1, columnspan=4, sticky="ew", padx=4
+        cadata_entry = ttk.Entry(file_row, textvariable=variables["cadata_path"], width=1)
+        cadata_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        cadata_entry.bind("<FocusOut>", lambda _event, i=index: self._refresh_conductor_selector(i))
+        browse = ttk.Button(
+            file_row,
+            text="Browse",
+            command=lambda i=index: self._browse_cadata(i),
         )
-        ttk.Button(frame, text="Browse", command=lambda i=index: self._browse_cadata(i)).grid(
-            row=0, column=5
-        )
-        conductor_label = ttk.Label(frame, text="Conductor name")
-        conductor_label.grid(row=1, column=0, sticky="w", padx=(0, 4))
+        browse.grid(row=0, column=2, sticky="e")
+        self.cadata_browse_buttons.append(browse)
+
+        conductor_row = ttk.Frame(frame)
+        conductor_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        conductor_row.columnconfigure(1, weight=1)
+        conductor_label = ttk.Label(conductor_row, text="Conductor name")
+        conductor_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
         attach_tooltip(conductor_label, PARAMETER_HELP["layer_conductor_name"])
-        ttk.Entry(frame, textvariable=variables["conductor_name"], width=18).grid(
-            row=1, column=1, columnspan=2, sticky="ew", padx=(0, 4)
+        conductor_names = _cadata_conductor_names(variables["cadata_path"].get())
+        selected_conductor = variables["conductor_name"].get().strip()
+        if selected_conductor and selected_conductor not in conductor_names:
+            variables["conductor_name"].set("")
+        elif not selected_conductor and len(conductor_names) == 1:
+            variables["conductor_name"].set(conductor_names[0])
+        conductor = ttk.Combobox(
+            conductor_row,
+            textvariable=variables["conductor_name"],
+            values=conductor_names,
+            state="readonly" if conductor_names else "disabled",
+            width=1,
         )
-        clearance_label = ttk.Label(frame, text="Min block clearance [mm]")
-        clearance_label.grid(row=1, column=3, sticky="e", padx=(8, 4))
-        attach_tooltip(
-            clearance_label,
-            PARAMETER_HELP["layer_min_inter_block_gap_mm"],
-        )
-        ttk.Entry(
-            frame,
-            textvariable=variables["min_inter_block_gap_mm"],
-            width=8,
-        ).grid(row=1, column=4, sticky="w", padx=(0, 4))
-        labels = [
-            ("Max blocks", "n_blocks"),
-            ("Min blocks", "min_blocks"),
-            ("Turns min", "turn_min"),
-            ("Turns max", "turn_max"),
-        ]
+        conductor.grid(row=0, column=1, sticky="ew")
+        conductor.bind("<<ComboboxSelected>>", lambda _event: self._update_current_advice())
+        self.conductor_widgets.append(conductor)
+
+        labels = list(LAYER_TOPOLOGY_FIELDS)
         if index > 0:
             labels.append(("Radial gap [mm]", "radial_gap_mm"))
         labels.append(("Azimuthal gap [mm]", "azimuthal_gap_mm"))
-        for column, (label, key) in enumerate(labels):
-            label_widget = ttk.Label(frame, text=label)
-            label_widget.grid(row=2, column=column, sticky="w", padx=(0, 4))
+        labels.append(("Min block clearance [mm]", "min_inter_block_gap_mm"))
+        for position, (label, key) in enumerate(labels):
+            field = ttk.Frame(frame)
+            field.grid(
+                row=2 + position // 2,
+                column=position % 2,
+                sticky="ew",
+                padx=(0, 6) if position % 2 == 0 else (6, 0),
+                pady=2,
+            )
+            field.columnconfigure(0, weight=1)
+            label_widget = ttk.Label(field, text=label, wraplength=155, justify="left")
+            label_widget.grid(row=0, column=0, sticky="w")
             attach_tooltip(label_widget, PARAMETER_HELP.get(f"layer_{key}", ""))
-            ttk.Entry(frame, textvariable=variables[key], width=8).grid(
-                row=3, column=column, sticky="ew", padx=(0, 4)
+            ttk.Entry(field, textvariable=variables[key], width=8).grid(
+                row=1, column=0, sticky="ew"
             )
 
     def _update_current_advice(self) -> None:
@@ -962,10 +1139,7 @@ class App(tk.Tk):
             text = path.read_text(encoding="utf-8")
             conductor_name = layer["conductor_name"].get().strip()
             if not conductor_name:
-                names = tuple(parse_cadata_text(text).conductors)
-                if len(names) != 1:
-                    raise ValueError("select the Layer 1 conductor name")
-                conductor_name = names[0]
+                raise ValueError("select the Layer 1 conductor name")
             resolution = resolve_conductor(text, conductor_name)
             data = _resolved_conductor_data(resolution)
             advice = conservative_maximum_current_advice(
@@ -998,8 +1172,25 @@ class App(tk.Tk):
         )
         if path:
             self.layer_vars[index]["cadata_path"].set(path)
+            self._refresh_conductor_selector(index)
             if index == 0:
                 self._update_current_advice()
+
+    def _refresh_conductor_selector(self, index: int) -> None:
+        """Populate conductors linked to supported critical-current fits."""
+
+        if index >= len(self.layer_vars) or index >= len(self.conductor_widgets):
+            return
+        names = _cadata_conductor_names(self.layer_vars[index]["cadata_path"].get())
+        widget = self.conductor_widgets[index]
+        widget.configure(values=names, state="readonly" if names else "disabled")
+        selected = self.layer_vars[index]["conductor_name"].get().strip()
+        if selected and selected not in names:
+            self.layer_vars[index]["conductor_name"].set("")
+        elif not selected and len(names) == 1:
+            self.layer_vars[index]["conductor_name"].set(names[0])
+        if index == 0:
+            self._update_current_advice()
 
     def _browse_output_dir(self) -> None:
         initial_dir = self.output_dir_var.get().strip()
@@ -1027,7 +1218,10 @@ class App(tk.Tk):
                 Path(str(state["output_dir"]).strip() or Path.cwd()),
                 str(state["campaign_name"]),
             )
-            save_config(state, self._run_dir / "campaign.json")
+            active_run_state = copy.deepcopy(state)
+            save_config(active_run_state, self._run_dir / "campaign.json")
+            _snapshot_run_inputs(self._run_dir, active_run_state, targets)
+            self._active_run_state = active_run_state
         except (OSError, ValueError, tk.TclError) as exc:
             messagebox.showerror("Invalid campaign inputs", str(exc))
             return
@@ -1055,6 +1249,7 @@ class App(tk.Tk):
         if self.progress_bar is not None:
             self.progress_bar.configure(maximum=n_gen, value=0)
         self._clear_result_tables()
+        self._reset_live_dashboard(targets)
         self._append_log(f"Starting campaign. Results: {self._run_dir}")
         self._append_log(jit_status() + ".")
         self._append_log(
@@ -1080,8 +1275,33 @@ class App(tk.Tk):
     def _request_stop(self) -> None:
         self.runner.request_stop()
 
+    def _on_close(self) -> None:
+        """Close immediately when idle, or cooperatively stop an active run."""
+
+        if not self.runner.is_running:
+            self.destroy()
+            return
+        if not messagebox.askyesno(
+            "Campaign is running",
+            "Stop the campaign after its active generation and close DOT?",
+        ):
+            return
+        self._close_pending = True
+        self.runner.request_stop()
+        self.progress_var.set("Stopping before closing...")
+        self.run_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.after(200, self._finish_close_when_stopped)
+
+    def _finish_close_when_stopped(self) -> None:
+        if self.runner.is_running:
+            self.after(200, self._finish_close_when_stopped)
+            return
+        self.runner.join(timeout=0.0)
+        self.destroy()
+
     def _show_help(self) -> None:
-        """Workflow overview for a first-time user (task 0057).
+        """Workflow overview for a first-time user.
 
         Hover any parameter's label for its specific definition; this
         dialog is the "what order do I fill things in, and what happens
@@ -1093,21 +1313,35 @@ class App(tk.Tk):
             "DOT searches for a superconducting dipole coil cross-section that hits your "
             "target field, field-quality, and load-line-margin targets.\n\n"
             "1. Magnet Physics: set the target bore field, aperture radius, layer count, "
-            "and operating temperature.\n\n"
+            "and operating temperature. DOT automatically sets the reference radius to two-thirds "
+            "of the aperture radius (rounded to 0.001 mm); clear the automatic check box if your "
+            "project specifies another value.\n\n"
             "2. Per-Layer Topology: for EACH layer, point at a .cadata file with the "
-            "conductor's properties; set radial and azimuthal gaps, maximum blocks, turn "
+            "conductor's properties, then select a CONDUCTOR from the filtered drop-down. "
+            "Only conductors linked to a supported fit are offered. DOT supports REMFIT "
+            "type 1 (Bottura Nb-Ti) and type 11 "
+            "(CERN high-field Nb3Sn) for load-line calculations; REMFIT types 2-10 are "
+            "not supported. Set radial and azimuthal gaps, maximum blocks, turn "
             "bounds, and block clearance. DOT derives the midplane R/phi anchor, fixes "
             "alpha=0 there, chooses its turns, and synthesizes every later block.\n\n"
-            "3. Geometry / Acceptance Targets: set Layer 1's pole-turn radius proxy and the field-quality/"
-            "margin/current targets a candidate must meet to be accepted. In Advanced harmonics, "
+            "3. Geometry / Acceptance Targets: set Layer 1's pole-turn radius proxy and keep layer "
+            "nesting enabled for the conservative windability check. Nesting prolongs both long edges "
+            "of the preceding layer's pole-most turn and keeps the next layer on the aperture side of "
+            "those boundaries. Then set the field-quality/"
+            "margin/current targets a candidate must meet to be accepted. Set equal minimum and "
+            "maximum currents to request an exact fixed series current. In Advanced harmonics, "
             "you can assign a signed no-iron target to each bn; for example b3=-3 compensates a "
             "known +3-unit yoke contribution. The general harmonic limit applies to |bn-target|.\n\n"
             "4. NSGA-II Parameters: population size and generation count control how "
             "thoroughly the search explores (bigger = more thorough, slower). Optional "
             "parallel candidate evaluation uses several processes; leave it off if the "
             "computer is memory-constrained.\n\n"
-            "5. Click 'Run Campaign'. The Cross-Section Plot and Live Convergence chart "
-            "update every generation; Elapsed/ETA estimate remaining time. When the run "
+            "5. Click 'Start Campaign'. DOT clears the preceding run from the live dashboard "
+            "and redraws its target lines from the values currently visible in the form. The "
+            "Cross-Section Plot and Live Convergence chart "
+            "update every generation. DOT recalculates the displayed candidate's margin and "
+            "harmonics before showing them; this reporting cost is included in Elapsed/ETA. "
+            "When the run "
             "finishes, the Results panel shows the best candidate found (or the closest "
             "trade-off if nothing fully met your targets).\n\n"
             "Hover any parameter's label (wait briefly) to see what it means and how to "
@@ -1125,7 +1359,7 @@ class App(tk.Tk):
         self._update_live_clock()
         if self.runner.is_running:
             self.after(200, self._poll_runner)
-        else:
+        elif not self.__dict__.get("_close_pending", False):
             self.run_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
 
@@ -1142,11 +1376,11 @@ class App(tk.Tk):
             else:
                 self.progress_var.set(event.message)
         elif event.kind == "generation":
-            # task 0052: live best-candidate-per-generation view (dd parity).
+            # Live best-candidate-per-generation view.
             if event.generation is not None and event.total_generations is not None:
                 status = f"Generation {event.generation}/{event.total_generations} (running)"
                 if event.margin_percent is not None:
-                    status += f" -- best margin so far: {event.margin_percent:.2f}%"
+                    status += f" -- selected margin: {event.margin_percent:.2f}%"
                 self.progress_var.set(status)
                 if self.progress_bar is not None:
                     self.progress_bar.configure(
@@ -1158,7 +1392,7 @@ class App(tk.Tk):
                 self._populate_block_table(event.design)
                 self._populate_live_electromagnetic_table(event)
                 self._archive_generation(event)
-            # task 0056: live progress dashboard (ETA/elapsed + convergence chart).
+            # Live progress dashboard (ETA/elapsed + convergence chart).
             self.elapsed_var.set(f"Elapsed: {format_duration(event.elapsed_seconds)}")
             self.eta_var.set(f"ETA: {format_duration(event.eta_seconds)}")
             self._eta_at_event = event.eta_seconds
@@ -1170,13 +1404,12 @@ class App(tk.Tk):
                 summary_parts.append(f"harmonic residual {event.harmonic_units:.2f} units")
             if event.design is not None:
                 total_turns = sum(
-                    block.n_turns
-                    for layer in event.design.layers
-                    for block in layer.blocks
+                    block.n_turns for layer in event.design.layers for block in layer.blocks
                 )
                 summary_parts.append(f"{total_turns} turns")
             self.best_summary_var.set(
-                "Best so far: " + (", ".join(summary_parts) if summary_parts else "--")
+                "Selected candidate: "
+                + (", ".join(summary_parts) if summary_parts else "--")
             )
             self._update_convergence_panel(event.history)
         elif event.kind == "error":
@@ -1199,6 +1432,9 @@ class App(tk.Tk):
 
     def _show_result(self, result) -> None:  # noqa: ANN001
         output_dir = self._run_dir
+        campaign_name, reference_radius_mm, max_harmonic_units, min_margin_percent = (
+            self._active_result_context()
+        )
         if not result.candidates:
             self.result_var.set(
                 "No certified candidate met every target. See the saved near-feasible archive "
@@ -1208,11 +1444,11 @@ class App(tk.Tk):
                 archive = export_no_candidate_result(
                     output_dir,
                     result,
-                    campaign_name=self.campaign_name_var.get(),
-                    reference_radius_mm=float(self.reference_radius_var.get()),
+                    campaign_name=campaign_name,
+                    reference_radius_mm=reference_radius_mm,
                     conductor_labels=self._conductor_labels,
-                    max_harmonic_units=float(self.max_harmonic_var.get()),
-                    min_margin_percent=float(self.min_margin_var.get()),
+                    max_harmonic_units=max_harmonic_units,
+                    min_margin_percent=min_margin_percent,
                 )
                 self.result_location_var.set(f"Results folder: {output_dir}")
                 self._append_log(f"Saved diagnostic archive: {archive}")
@@ -1225,8 +1461,8 @@ class App(tk.Tk):
             return
         best_index = best_candidate_index(
             result,
-            max_harmonic_units=float(self.max_harmonic_var.get()),
-            min_margin_percent=float(self.min_margin_var.get()),
+            max_harmonic_units=max_harmonic_units,
+            min_margin_percent=min_margin_percent,
         )
         candidate = result.candidates[best_index]
         achieved_field = _center_by(candidate.design)
@@ -1239,9 +1475,10 @@ class App(tk.Tk):
             default=None,
         )
         pole_turn_clearance = first_layer_pole_turn_clearance_mm(candidate.design)
-        meets_targets = harmonic_units <= float(
-            self.max_harmonic_var.get()
-        ) and margin_percent >= float(self.min_margin_var.get())
+        meets_targets = (
+            harmonic_units <= max_harmonic_units
+            and margin_percent >= min_margin_percent
+        )
         self.result_var.set(
             "\n".join(
                 (
@@ -1262,12 +1499,9 @@ class App(tk.Tk):
                         else f"{pole_turn_clearance:.6g} mm"
                     ),
                     f"Acceptance: {'meets targets' if meets_targets else 'does not meet targets'}",
-                    *_margin_exclusion_lines(result),
                 )
             )
         )
-        for line in _margin_exclusion_lines(result):
-            self._append_log(line)
         self._draw_plot(candidate.design)
         self._populate_block_table(candidate.design)
         self._populate_final_electromagnetic_table(candidate, meets_targets)
@@ -1276,11 +1510,11 @@ class App(tk.Tk):
                 output_dir,
                 result,
                 best_index=best_index,
-                campaign_name=self.campaign_name_var.get(),
-                reference_radius_mm=float(self.reference_radius_var.get()),
+                campaign_name=campaign_name,
+                reference_radius_mm=reference_radius_mm,
                 conductor_labels=self._conductor_labels,
-                max_harmonic_units=float(self.max_harmonic_var.get()),
-                min_margin_percent=float(self.min_margin_var.get()),
+                max_harmonic_units=max_harmonic_units,
+                min_margin_percent=min_margin_percent,
             )
             self.result_location_var.set(f"Results folder: {output_dir}")
             self._append_log(f"Saved final cross-section: {artifacts.cross_section_png}")
@@ -1289,9 +1523,28 @@ class App(tk.Tk):
             self._append_log(f"Saved Pareto archive: {artifacts.pareto_json}")
             self._append_log(f"Saved final Pareto frontier: {artifacts.pareto_frontier_png}")
             self._append_log(
-                "Saved flat best-per-topology design folder: "
-                f"{artifacts.selected_designs_dir}"
+                f"Saved flat best-per-topology design folder: {artifacts.selected_designs_dir}"
             )
+
+    def _active_result_context(self) -> tuple[str, float, float, float]:
+        """Return the immutable settings captured by the active Start click."""
+
+        state = self.__dict__.get("_active_run_state")
+        if state is not None:
+            acceptance = state["acceptance"]
+            return (
+                str(state["campaign_name"]),
+                float(state["reference_radius_mm"]),
+                float(acceptance["max_harmonic_units"]),
+                float(acceptance["min_margin_percent"]),
+            )
+        # Compatibility for direct unit-level rendering outside a live run.
+        return (
+            str(self.campaign_name_var.get()),
+            float(self.reference_radius_var.get()),
+            float(self.max_harmonic_var.get()),
+            float(self.min_margin_var.get()),
+        )
 
     def _clear_result_tables(self) -> None:
         for tree in (self.block_tree, self.electromagnetic_tree):
@@ -1321,31 +1574,29 @@ class App(tk.Tk):
         if event.design is None:
             return
         rows = [
-            ("Live search", "Bore field [T]", f"{abs(_center_by(event.design)):.6g}"),
+            ("Live candidate", "Bore field [T]", f"{abs(_center_by(event.design)):.6g}"),
             (
-                "Live search",
+                "Live candidate",
                 "Operating current [A]",
                 f"{abs(_operating_current(event.design)):.6g}",
             ),
             (
-                "Live search",
+                "Live candidate",
                 "Worst harmonic residual [units]",
                 "--" if event.harmonic_units is None else f"{event.harmonic_units:.6g}",
             ),
             (
-                "Live search",
+                "Live candidate",
                 "Minimum margin [%]",
                 "--" if event.margin_percent is None else f"{event.margin_percent:.6g}",
             ),
         ]
         target_by_order = (
-            dict(self._last_targets.harmonic_targets)
-            if self._last_targets is not None
-            else {}
+            dict(self._last_targets.harmonic_targets) if self._last_targets is not None else {}
         )
         rows.extend(
             (
-                "Live harmonic",
+                "Harmonic",
                 f"b{order}: actual / target / residual [units]",
                 f"{normal:.6g} / {target_by_order.get(order, 0.0):.6g} / "
                 f"{normal - target_by_order.get(order, 0.0):.6g} (a{order}={skew:.3g})",
@@ -1355,7 +1606,7 @@ class App(tk.Tk):
         )
         rows.extend(
             (
-                "Live load line",
+                "Load line",
                 f"Block {record.roxie_block}: Bpeak / Iss / margin",
                 f"{record.peak_field_t:.6g} T / {record.short_sample_current_a:.6g} A / "
                 f"{record.margin_percent:.6g}%",
@@ -1470,14 +1721,14 @@ class App(tk.Tk):
                 event.harmonic_units,
                 event.margin_percent,
                 abs(_operating_current(event.design)),
+                margin_records=event.margin_by_layer,
                 block_margin_records=event.margin_by_block,
                 harmonics=event.harmonics,
                 harmonic_targets=(
-                    self._last_targets.harmonic_targets
-                    if self._last_targets is not None
-                    else ()
+                    self._last_targets.harmonic_targets if self._last_targets is not None else ()
                 ),
                 cable_labels=self._conductor_labels,
+                evaluation_fidelity=event.evaluation_fidelity,
             )
         except (OSError, ValueError) as exc:
             self._append_log(f"Could not save generation {event.generation}: {exc}")
@@ -1512,12 +1763,109 @@ class App(tk.Tk):
             messagebox.showerror("Could not open results folder", str(exc))
 
     def _draw_plot(self, design) -> None:  # noqa: ANN001
+        if self.plot_placeholder is not None:
+            self.plot_placeholder.destroy()
+            self.plot_placeholder = None
         if self.plot_canvas is not None:
             self.plot_canvas.get_tk_widget().destroy()
         figure = cross_section_figure(design)
         self.plot_canvas = FigureCanvasTkAgg(figure, master=self.plot_frame)
         self.plot_canvas.draw()
         self.plot_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def _reset_live_dashboard(self, targets: OptimizationTargets) -> None:
+        """Start a campaign with no visual state inherited from the previous run."""
+
+        if self.plot_canvas is not None:
+            widget = self.plot_canvas.get_tk_widget()
+            widget.destroy()
+            try:
+                self.plot_canvas.figure.clear()
+            except AttributeError:
+                pass
+            self.plot_canvas = None
+        if self.plot_placeholder is not None:
+            self.plot_placeholder.destroy()
+        self.plot_placeholder = ttk.Label(
+            self.plot_frame,
+            text="Waiting for generation 1...",
+            anchor="center",
+        )
+        self.plot_placeholder.grid(row=0, column=0, sticky="nsew")
+        self._reset_convergence_panel(targets)
+
+    def _reset_convergence_panel(self, targets: OptimizationTargets) -> None:
+        """Clear prior histories and draw limits from this campaign's input snapshot."""
+
+        if self.conv_ax_margin is None:
+            return
+        for axes in (self.conv_ax_margin, self.conv_ax_harmonic, self.conv_ax_turns):
+            for line in tuple(axes.lines):
+                line.remove()
+            legend = axes.get_legend()
+            if legend is not None:
+                legend.remove()
+
+        self.conv_line_margin = None
+        self.conv_line_harmonic = None
+        self.conv_line_total_turns = None
+        self.conv_margin_target_line = None
+        self.conv_harmonic_target_line = None
+        self._initialize_convergence_lines(targets)
+
+        for axes in (self.conv_ax_margin, self.conv_ax_harmonic, self.conv_ax_turns):
+            axes.relim()
+            axes.autoscale(enable=True, axis="both", tight=False)
+        self.conv_ax_turns.yaxis.get_major_locator().set_params(integer=True)
+        if self.conv_canvas is not None:
+            self.conv_canvas.draw_idle()
+
+    def _initialize_convergence_lines(self, targets: OptimizationTargets | None = None) -> None:
+        """Create empty trend lines and the current campaign's acceptance lines."""
+
+        (self.conv_line_margin,) = self.conv_ax_margin.plot(
+            [], [], "-", color="#2980B9", linewidth=1.6
+        )
+        (self.conv_line_harmonic,) = self.conv_ax_harmonic.plot(
+            [], [], "-", color="#C0392B", linewidth=1.6
+        )
+        (self.conv_line_total_turns,) = self.conv_ax_turns.plot(
+            [], [], "-o", color="#111827", linewidth=1.8, markersize=3
+        )
+
+        try:
+            margin_target = (
+                float(targets.min_margin_percent)
+                if targets is not None and targets.min_margin_percent is not None
+                else float(self.min_margin_var.get())
+            )
+            self.conv_margin_target_line = self.conv_ax_margin.axhline(
+                margin_target,
+                color="#888888",
+                linestyle="--",
+                linewidth=0.9,
+                label="target",
+            )
+            self.conv_ax_margin.legend(fontsize=7, loc="lower right")
+        except (tk.TclError, TypeError, ValueError):
+            self.conv_margin_target_line = None
+
+        try:
+            harmonic_target = (
+                float(targets.max_harmonic_units)
+                if targets is not None and targets.max_harmonic_units is not None
+                else float(self.max_harmonic_var.get())
+            )
+            self.conv_harmonic_target_line = self.conv_ax_harmonic.axhline(
+                harmonic_target,
+                color="#888888",
+                linestyle="--",
+                linewidth=0.9,
+                label="limit",
+            )
+            self.conv_ax_harmonic.legend(fontsize=7, loc="upper right")
+        except (tk.TclError, TypeError, ValueError):
+            self.conv_harmonic_target_line = None
 
     def _update_convergence_panel(self, history: tuple) -> None:
         """Redraw margin, harmonic-residual, and total-turn trends."""
@@ -1542,31 +1890,7 @@ class App(tk.Tk):
         total_turn_x, total_turn_y = _xy(total_turns)
 
         if self.conv_line_margin is None:
-            (self.conv_line_margin,) = self.conv_ax_margin.plot(
-                [], [], "-", color="#2980B9", linewidth=1.6
-            )
-            (self.conv_line_harmonic,) = self.conv_ax_harmonic.plot(
-                [], [], "-", color="#C0392B", linewidth=1.6
-            )
-            (self.conv_line_total_turns,) = self.conv_ax_turns.plot(
-                [], [], "-o", color="#111827", linewidth=1.8, markersize=3
-            )
-            try:
-                margin_target = float(self.min_margin_var.get())
-                self.conv_margin_target_line = self.conv_ax_margin.axhline(
-                    margin_target, color="#888888", linestyle="--", linewidth=0.9, label="target"
-                )
-                self.conv_ax_margin.legend(fontsize=7, loc="lower right")
-            except (tk.TclError, ValueError):
-                self.conv_margin_target_line = None
-            try:
-                harmonic_target = float(self.max_harmonic_var.get())
-                self.conv_harmonic_target_line = self.conv_ax_harmonic.axhline(
-                    harmonic_target, color="#888888", linestyle="--", linewidth=0.9, label="limit"
-                )
-                self.conv_ax_harmonic.legend(fontsize=7, loc="upper right")
-            except (tk.TclError, ValueError):
-                self.conv_harmonic_target_line = None
+            self._initialize_convergence_lines(self.__dict__.get("_last_targets"))
 
         self.conv_line_margin.set_data(margin_x, margin_y)
         self.conv_line_harmonic.set_data(harmonic_x, harmonic_y)
@@ -1576,7 +1900,8 @@ class App(tk.Tk):
             ax.relim()
             ax.autoscale_view()
         self.conv_ax_turns.yaxis.get_major_locator().set_params(integer=True)
-        self.conv_canvas.draw_idle()
+        if self.conv_canvas is not None:
+            self.conv_canvas.draw_idle()
 
     def _append_log(self, message: str) -> None:
         self.log.configure(state="normal")
@@ -1589,8 +1914,7 @@ class App(tk.Tk):
         aperture = float(state["aperture_radius_mm"])
         cables: dict[str, CableSpec] = {}
         cable_ids: list[str] = []
-        conductor_data: list[LayerConductorData | None] = []
-        margin_exclusions: list[MarginEvaluationExclusion] = []
+        conductor_data: list[LayerConductorData] = []
         for index, layer in enumerate(state["layers"]):
             cadata_path = str(layer["cadata_path"]).strip()
             path = Path(cadata_path) if cadata_path else None
@@ -1601,29 +1925,19 @@ class App(tk.Tk):
             cable_id = f"layer-{index + 1}"
             cable_ids.append(cable_id)
             if not conductor_name:
-                records = parse_cadata_text(text)
-                names = tuple(records.conductors)
-                if len(names) != 1:
-                    raise ValueError(
-                        f"Layer {index + 1}: select an explicit CONDUCTOR name; "
-                        f"catalogue contains {len(names)} conductors"
-                    )
-                conductor_name = names[0]
+                names = _supported_conductor_names_from_cadata_text(text)
+                raise ValueError(
+                    f"Layer {index + 1}: select a supported CONDUCTOR from the list; "
+                    f"catalogue contains {len(names)} usable conductors"
+                )
             resolution = resolve_conductor(text, conductor_name)
-            if resolution.status == "not_found":
-                raise ValueError(resolution.message)
+            if not resolution.is_resolved:
+                raise ValueError(
+                    f"Layer {index + 1}: CONDUCTOR {conductor_name!r} is not usable: "
+                    f"{resolution.message}"
+                )
             cables[cable_id] = resolution.cable_spec()
-            if resolution.status == "unsupported_fit_type":
-                conductor_data.append(None)
-                reason = resolution.message
-                margin_exclusions.append(
-                    MarginEvaluationExclusion(layer_index=index, reason=reason)
-                )
-                self._append_log_if_ready(
-                    f"Margin evaluation excluded for Layer {index + 1}: {reason}"
-                )
-            else:
-                conductor_data.append(_resolved_conductor_data(resolution))
+            conductor_data.append(_resolved_conductor_data(resolution))
         anchors = midplane_anchors_from_gaps(
             aperture,
             tuple(cables[cable_id] for cable_id in cable_ids),
@@ -1661,16 +1975,14 @@ class App(tk.Tk):
             max_order=int(state["max_harmonic_order"]),
             harmonic_orders=_allowed_normal_orders(int(state["max_harmonic_order"])),
             harmonic_targets=tuple(
-                (order, target)
-                for order, target in _state_harmonic_targets(state).items()
+                (order, target) for order, target in _state_harmonic_targets(state).items()
             ),
             cadata_by_layer=tuple(conductor_data),
             temperature_k=float(state["temperature_k"]),
             max_harmonic_units=float(state["acceptance"]["max_harmonic_units"]),
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
+            min_current_a=state["acceptance"].get("min_current_a"),
             max_current_a=state["acceptance"].get("max_current_a"),
-            pareto_search=bool(state["nsga2"].get("pareto_search", True)),
-            excluded_margin_layers=tuple(margin_exclusions),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=0.0,
@@ -1704,12 +2016,14 @@ class App(tk.Tk):
             "target_bore_field_t": float(self.target_field_var.get()),
             "aperture_radius_mm": float(self.aperture_var.get()),
             "reference_radius_mm": float(self.reference_radius_var.get()),
+            "auto_reference_radius": bool(self.auto_reference_radius_var.get()),
             "max_harmonic_order": max_harmonic_order,
             "n_layers": n_layers,
             "temperature_k": float(self.temperature_var.get()),
             "acceptance": {
                 "max_harmonic_units": float(self.max_harmonic_var.get()),
                 "min_margin_percent": float(self.min_margin_var.get()),
+                "min_current_a": _optional_float(self.min_current_var.get()),
                 "max_current_a": _optional_float(self.max_current_var.get()),
                 "harmonic_targets": {
                     str(order): float(harmonic_target_vars[order].get())
@@ -1722,7 +2036,6 @@ class App(tk.Tk):
                 "pop_size": int(self.pop_size_var.get()),
                 "n_gen": int(self.n_gen_var.get()),
                 "seed": int(self.seed_var.get()) if self.seed_var.get().strip() else None,
-                "pareto_search": bool(self.pareto_search_var.get()),
                 "parallel_evaluations": bool(parallel_var.get()) if parallel_var else False,
             },
             "feasibility": {
@@ -1762,15 +2075,27 @@ class App(tk.Tk):
         self.campaign_name_var.set(str(state.get("campaign_name", DEFAULT_STATE["campaign_name"])))
         self.output_dir_var.set(str(state.get("output_dir", DEFAULT_STATE["output_dir"])))
         self.target_field_var.set(str(state["target_bore_field_t"]))
-        self.aperture_var.set(str(state["aperture_radius_mm"]))
-        self.reference_radius_var.set(
-            str(
-                state.get(
-                    "reference_radius_mm",
-                    _two_thirds_reference_radius(float(state["aperture_radius_mm"])),
-                )
-            )
+        aperture_radius_mm = float(state["aperture_radius_mm"])
+        expected_reference_radius_mm = _two_thirds_reference_radius(aperture_radius_mm)
+        configured_reference_radius_mm = float(
+            state.get("reference_radius_mm", expected_reference_radius_mm)
         )
+        automatic_setting = state.get("auto_reference_radius")
+        if automatic_setting is None:
+            automatic_setting = math.isclose(
+                configured_reference_radius_mm,
+                expected_reference_radius_mm,
+                rel_tol=0.0,
+                abs_tol=0.0005,
+            )
+        self.auto_reference_radius_var.set(bool(automatic_setting))
+        self.aperture_var.set(str(aperture_radius_mm))
+        self.reference_radius_var.set(
+            f"{expected_reference_radius_mm:.3f}"
+            if automatic_setting
+            else str(configured_reference_radius_mm)
+        )
+        self._configure_reference_entry()
         self.max_harmonic_order_var.set(str(state.get("max_harmonic_order", 11)))
         self.n_layers_var.set(int(state["n_layers"]))
         self.temperature_var.set(str(state["temperature_k"]))
@@ -1800,6 +2125,7 @@ class App(tk.Tk):
         )
         self.max_harmonic_var.set(str(state["acceptance"]["max_harmonic_units"]))
         self.min_margin_var.set(str(state["acceptance"]["min_margin_percent"]))
+        self.min_current_var.set(_optional_float_text(state["acceptance"].get("min_current_a")))
         self.max_current_var.set(
             _optional_float_text(state["acceptance"].get("max_current_a", DEFAULT_MAX_CURRENT_A))
         )
@@ -1828,7 +2154,6 @@ class App(tk.Tk):
         self.n_gen_var.set(str(nsga2["n_gen"]))
         self._apply_search_preset()
         self.seed_var.set("" if nsga2.get("seed") is None else str(nsga2["seed"]))
-        self.pareto_search_var.set(bool(nsga2.get("pareto_search", True)))
         parallel_var = self.__dict__.get("parallel_evaluations_var")
         if parallel_var is not None:
             parallel_var.set(bool(nsga2.get("parallel_evaluations", False)))
@@ -1889,6 +2214,38 @@ def _coerce_var_value(key: str, value: str) -> str | int | float:
     return float(value)
 
 
+def _cadata_conductor_names(path_value: str) -> tuple[str, ...]:
+    """Return only usable conductors with a supported fit for the GUI selector."""
+
+    path = Path(path_value.strip())
+    if not path.is_file():
+        return ()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return _supported_conductor_names_from_cadata_text(text)
+    except (OSError, ValueError):
+        return ()
+
+
+def _supported_conductor_names_from_cadata_text(text: str) -> tuple[str, ...]:
+    """Return conductors whose full linked chain ends in REMFIT type 1 or 11."""
+
+    records = parse_cadata_text(text)
+    supported: list[str] = []
+    for name, conductor in records.conductors.items():
+        filament = records.filaments.get(conductor.filament_name)
+        if filament is None or filament.jc_fit_name not in records.remfits:
+            continue
+        if (
+            conductor.cable_name not in records.cables
+            or conductor.strand_name not in records.strands
+            or conductor.insul_name not in records.insulations
+        ):
+            continue
+        supported.append(name)
+    return tuple(supported)
+
+
 def _config_basename(campaign_name: Any) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(campaign_name).strip()).strip(".-")
     return safe or DEFAULT_CAMPAIGN_NAME
@@ -1947,13 +2304,6 @@ def _cable_spec_from_cadata_text(
     return resolution.cable_spec()
 
 
-def _margin_exclusion_lines(result) -> tuple[str, ...]:  # noqa: ANN001
-    return tuple(
-        f"Margin skipped for Layer {exclusion.layer_index + 1}: {exclusion.reason}"
-        for exclusion in getattr(result, "excluded_margin_layers", ())
-    )
-
-
 def _center_by(design) -> float:  # noqa: ANN001
     sources = tuple(
         source for turn in design.all_turns() for source in place_line_current_sources(turn)
@@ -1974,7 +2324,7 @@ def _r_ref_from_aperture(aperture_radius_mm: float) -> float:
 
 
 def _two_thirds_reference_radius(aperture_radius_mm: float) -> float:
-    return (2.0 / 3.0) * aperture_radius_mm
+    return round((2.0 / 3.0) * aperture_radius_mm, 3)
 
 
 def _allowed_normal_orders(max_order: int) -> tuple[int, ...]:
@@ -2077,9 +2427,7 @@ def _migrate_layer_gap_controls(state: dict[str, Any]) -> dict[str, Any]:
                     legacy_radius * math.tan(math.radians(legacy_phi)),
                 )
             else:
-                converted["azimuthal_gap_mm"] = DEFAULT_STATE["layers"][0][
-                    "azimuthal_gap_mm"
-                ]
+                converted["azimuthal_gap_mm"] = DEFAULT_STATE["layers"][0]["azimuthal_gap_mm"]
 
         if index == 0:
             converted["radial_gap_mm"] = 0.0
@@ -2198,6 +2546,55 @@ def _mousewheel_scroll_units(delta: int, button_number: int | None = None) -> in
         return 0
     magnitude = max(1, int(round(abs(delta) / 120.0)))
     return -magnitude if delta > 0 else magnitude
+
+
+def _snapshot_run_inputs(
+    run_dir: Path,
+    state: dict[str, Any],
+    targets: OptimizationTargets | None = None,
+) -> Path:
+    """Copy conductor inputs and record the exact runtime used by a GUI run."""
+
+    inputs_dir = run_dir / "inputs"
+    inputs_dir.mkdir()
+    conductor_inputs: list[dict[str, Any]] = []
+    for layer_index, layer in enumerate(
+        state["layers"][: int(state["n_layers"])],
+        start=1,
+    ):
+        source = Path(str(layer["cadata_path"])).expanduser().resolve()
+        destination = inputs_dir / f"layer_{layer_index}_{source.name}"
+        shutil.copy2(source, destination)
+        conductor_inputs.append(
+            {
+                "layer": layer_index,
+                "conductor": str(layer["conductor_name"]),
+                "snapshot": destination.relative_to(run_dir).as_posix(),
+                "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+            }
+        )
+
+    package_versions = {}
+    for distribution in ("dot", "numpy", "matplotlib", "pymoo", "numba", "scipy"):
+        try:
+            package_versions[distribution] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            package_versions[distribution] = None
+    manifest = {
+        "schema_version": 1,
+        "dot_version": __version__,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "acceleration": jit_status(),
+        "packages": package_versions,
+        "inputs": conductor_inputs,
+    }
+    if targets is not None:
+        manifest["search_fidelity"] = asdict(targets.search_fidelity)
+        manifest["certification_fidelity"] = asdict(targets.certification_fidelity)
+    destination = run_dir / "run_manifest.json"
+    destination.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return destination
 
 
 def _new_run_directory(

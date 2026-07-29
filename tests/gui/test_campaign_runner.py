@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import queue
+from dataclasses import replace
 
 import pytest
 
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
-from dot.geometry import CableSpec
+from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.gui.campaign_runner import (
     CampaignEvent,
     CampaignRunner,
     _gui_topology_survival_config,
+    _worst_harmonic_residual,
 )
 from dot.optimize import LayerConductorData, LayerTopology, Topology
+from dot.optimize.objectives import harmonic_table, load_line_margin_by_block_detail
 from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
 from dot.optimize.runner import ParetoResult, run_campaign
 
@@ -40,8 +43,6 @@ def test_campaign_runner_returns_progress_and_same_result_as_direct_call() -> No
         pop_size=8,
         n_gen=3,
         seed=7,
-        topology_survival=_gui_topology_survival_config(topology, 8),
-        adaptive_offspring=True,
     )
     result_events = [event for event in collected if event.kind == "result"]
 
@@ -76,6 +77,60 @@ def test_campaign_runner_returns_progress_and_same_result_as_direct_call() -> No
         for event in generation_events
         if event.margin_by_block
     )
+    assert all(
+        event.evaluation_fidelity == targets.certification_fidelity
+        for event in generation_events
+        if event.design is not None
+    )
+    assert all(event.margin_by_layer for event in generation_events if event.design is not None)
+
+    last = generation_events[-1]
+    assert last.design is not None
+    expected_harmonics = harmonic_table(
+        last.design,
+        targets.r_ref_mm,
+        targets.max_order,
+        targets.certification_fidelity,
+    )
+    expected_blocks = load_line_margin_by_block_detail(
+        last.design,
+        targets.cadata_by_layer,
+        targets.temperature_k,
+        fidelity=targets.certification_fidelity,
+    )
+    assert len(last.harmonics) == len(expected_harmonics)
+    for actual_row, expected_row in zip(last.harmonics, expected_harmonics, strict=True):
+        assert actual_row == pytest.approx(expected_row)
+    assert last.harmonic_units == pytest.approx(
+        _worst_harmonic_residual(expected_harmonics, targets)
+    )
+    assert last.margin_percent == pytest.approx(
+        min(record.margin_percent for record in expected_blocks)
+    )
+    assert last.history[-1].harmonic_units == pytest.approx(last.harmonic_units)
+    assert last.history[-1].margin_percent == pytest.approx(last.margin_percent)
+
+
+def test_live_harmonic_reduction_respects_signed_targets() -> None:
+    targets = replace(
+        _targets(),
+        max_order=5,
+        harmonic_orders=(3, 5),
+        harmonic_targets=((3, -3.0), (5, 1.0)),
+    )
+
+    residual = _worst_harmonic_residual(
+        (
+            (1, 10000.0, 0.0),
+            (2, 900.0, 800.0),
+            (3, -4.5, 700.0),
+            (4, 600.0, 500.0),
+            (5, 3.0, 400.0),
+        ),
+        targets,
+    )
+
+    assert residual == pytest.approx(2.0)
 
 
 def test_gui_enables_population_scaled_topology_preservation() -> None:
@@ -148,6 +203,132 @@ def test_campaign_runner_forwards_optional_process_count(monkeypatch) -> None:  
     assert captured["n_workers"] == 3
 
 
+def test_live_diagnostics_never_fall_back_to_search_values(monkeypatch) -> None:  # noqa: ANN001
+    import dot.gui.campaign_runner as campaign_runner_module
+
+    cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
+    design = DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(
+            Layer(
+                inner_radius_mm=20.0,
+                blocks=(
+                    Block(
+                        phi_deg=10.0,
+                        alpha_deg=0.0,
+                        n_turns=1,
+                        cable=cable,
+                        inner_radius_mm=20.0,
+                        current_a=100.0,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    def fake_run_campaign(*_args, **kwargs):  # noqa: ANN003, ANN202
+        kwargs["on_generation"](1, 1, design, 91.0, 92.0, 1)
+        return ParetoResult(candidates=())
+
+    def fail_diagnostic(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ValueError("synthetic detailed-diagnostic failure")
+
+    monkeypatch.setattr(campaign_runner_module, "run_campaign", fake_run_campaign)
+    monkeypatch.setattr(campaign_runner_module, "harmonic_table", fail_diagnostic)
+    monkeypatch.setattr(
+        campaign_runner_module,
+        "load_line_margin_by_block_detail",
+        fail_diagnostic,
+    )
+
+    runner = CampaignRunner()
+    events = runner.start(
+        topology=_topology(),
+        targets=_targets(),
+        feasibility=_feasibility(),
+        pop_size=8,
+        n_gen=1,
+        seed=7,
+    )
+    runner.join(timeout=5.0)
+
+    generation = next(event for event in _drain(events) if event.kind == "generation")
+    assert generation.margin_percent is None
+    assert generation.harmonic_units is None
+    assert generation.harmonics == ()
+    assert generation.margin_by_block == ()
+    assert generation.history[-1].margin_percent is None
+    assert generation.history[-1].harmonic_units is None
+    assert "91" not in generation.message
+    assert "92" not in generation.message
+
+
+def test_live_message_reports_partial_diagnostics(monkeypatch) -> None:  # noqa: ANN001
+    import dot.gui.campaign_runner as campaign_runner_module
+
+    cable = CableSpec(width_mm=0.1, height_mm=0.1, insulation_thickness_mm=0.0)
+    design = DipoleDesign(
+        aperture_radius_mm=8.0,
+        layers=(
+            Layer(
+                inner_radius_mm=20.0,
+                blocks=(
+                    Block(
+                        phi_deg=10.0,
+                        alpha_deg=0.0,
+                        n_turns=1,
+                        cable=cable,
+                        inner_radius_mm=20.0,
+                        current_a=100.0,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    def fake_run_campaign(*_args, **kwargs):  # noqa: ANN003, ANN202
+        kwargs["on_generation"](1, 1, design, 91.0, 92.0, 1)
+        return ParetoResult(candidates=())
+
+    def fail_margin(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ValueError("synthetic detailed margin failure")
+
+    monkeypatch.setattr(campaign_runner_module, "run_campaign", fake_run_campaign)
+    monkeypatch.setattr(
+        campaign_runner_module,
+        "harmonic_table",
+        lambda *_args, **_kwargs: (
+            (1, 10000.0, 0.0),
+            (2, 0.0, 0.0),
+            (3, -2.5, 0.0),
+            (4, 0.0, 0.0),
+        ),
+    )
+    monkeypatch.setattr(
+        campaign_runner_module,
+        "load_line_margin_by_block_detail",
+        fail_margin,
+    )
+
+    runner = CampaignRunner()
+    events = runner.start(
+        topology=_topology(),
+        targets=_targets(),
+        feasibility=_feasibility(),
+        pop_size=8,
+        n_gen=1,
+        seed=7,
+    )
+    runner.join(timeout=5.0)
+
+    generation = next(event for event in _drain(events) if event.kind == "generation")
+    assert generation.margin_percent is None
+    assert generation.harmonic_units == pytest.approx(2.5)
+    assert "harmonic residual 2.50 units" in generation.message
+    assert "margin diagnostic unavailable" in generation.message
+    assert "no physical results available" not in generation.message
+
+
 def _drain(events: queue.Queue[CampaignEvent]) -> list[CampaignEvent]:
     drained = []
     while True:
@@ -180,7 +361,7 @@ def _targets() -> OptimizationTargets:
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(_conductor_data(),),
-        temperature_k=0.0,
+        temperature_k=1.9,
     )
 
 

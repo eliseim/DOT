@@ -7,7 +7,11 @@ import pytest
 
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.gui.generation_archive import save_generation_snapshot
-from dot.optimize.objectives import BlockMarginRecord, LayerMarginRecord
+from dot.optimize.objectives import (
+    CERTIFICATION_FIDELITY,
+    BlockMarginRecord,
+    LayerMarginRecord,
+)
 
 
 def _design() -> DipoleDesign:
@@ -59,6 +63,7 @@ def test_save_generation_snapshot_writes_png_and_characteristics_json(tmp_path: 
         harmonics=((1, 10000.0, 0.0), (3, -4.2, 0.0), (5, 1.2, 0.0)),
         harmonic_targets=((3, -3.0),),
         cable_labels=("HF",),
+        evaluation_fidelity=CERTIFICATION_FIDELITY,
     )
 
     png_path = tmp_path / "gen_0003.png"
@@ -69,6 +74,13 @@ def test_save_generation_snapshot_writes_png_and_characteristics_json(tmp_path: 
     snapshot_text = json_path.read_text()
     assert "roxie" not in snapshot_text.lower()
     characteristics = json.loads(snapshot_text)
+    assert characteristics["schema_version"] == 3
+    assert characteristics["evaluation_fidelity"] == {
+        "name": "certify-v1",
+        "bore_filaments_per_axis": 12,
+        "peak_filaments_per_axis": 80,
+        "bore_quadrature": "midpoint",
+    }
     assert characteristics["generation"] == 3
     assert characteristics["total_generations"] == 10
     assert characteristics["harmonic_units"] == 4.2
@@ -136,5 +148,6 @@ def test_save_generation_snapshot_without_margin_records_still_writes_files(tmp_
     )
 
     characteristics = json.loads(json_path.read_text())
+    assert characteristics["evaluation_fidelity"] is None
     assert characteristics["limiting_layer"] is None
     assert characteristics["per_layer_margin"] == []

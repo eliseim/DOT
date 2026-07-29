@@ -136,7 +136,7 @@ def test_certification_fidelity_matches_no_iron_roxie_cth_harmonic_vector() -> N
 
 def test_search_fidelity_does_not_hide_the_cth_loadline_margin() -> None:
     root = Path(__file__).resolve().parents[2]
-    cadata = (root / "benchmarks" / "cth14t_no_iron" / "cth14t.cadata").read_text(encoding="utf-8")
+    cadata = (root / "campaign" / "dot_cables.cadata").read_text(encoding="utf-8")
     resolutions = tuple(
         resolve_conductor(cadata, name) for name in ("CTH_HF", "CTH_HF", "CTH_LF", "CTH_LF")
     )
@@ -158,6 +158,22 @@ def test_search_fidelity_does_not_hide_the_cth_loadline_margin() -> None:
     )
 
     assert min(record.margin_percent for record in margins) >= 25.0
+
+
+def test_search_harmonics_track_certification_without_false_low_order_optimum() -> None:
+    """The fast Gaussian rule must stay close to the dense certification vector."""
+
+    design = _cth14t_design()
+    search = harmonic_table(design, R_REF_MM, 11, SEARCH_FIDELITY)
+    certification = harmonic_table(design, R_REF_MM, 11, CERTIFICATION_FIDELITY)
+    search_by_order = {order: normal for order, normal, _skew in search}
+    certification_by_order = {order: normal for order, normal, _skew in certification}
+
+    for order in REFERENCE_HARMONICS:
+        assert search_by_order[order] == pytest.approx(
+            certification_by_order[order],
+            abs=0.35,
+        )
 
 
 def _cth14t_design() -> DipoleDesign:

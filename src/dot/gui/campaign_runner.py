@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import queue
 import threading
 from dataclasses import dataclass
@@ -11,12 +10,17 @@ from dot.geometry import DipoleDesign
 from dot.optimize.genome import Topology
 from dot.optimize.objectives import (
     BlockMarginRecord,
+    EvaluationFidelity,
+    LayerMarginRecord,
     harmonic_table,
     load_line_margin_by_block_detail,
 )
 from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
 from dot.optimize.runner import CampaignCancelled, ParetoResult, run_campaign
-from dot.optimize.topology_survival import TopologySurvivalConfig
+from dot.optimize.topology_survival import (
+    TopologySurvivalConfig,
+    recommended_topology_survival_config,
+)
 
 from .progress_tracking import CampaignProgressTracker, GenerationRecord
 
@@ -31,7 +35,7 @@ class CampaignEvent:
     total_generations: int | None = None
     result: ParetoResult | None = None
     error: BaseException | None = None
-    # task 0052: live per-generation best-candidate view (kind="generation").
+    # Live per-generation best-candidate view (kind="generation").
     design: DipoleDesign | None = None
     margin_percent: float | None = None
     # Live progress dashboard: harmonic signal plus best-design turn history
@@ -45,7 +49,9 @@ class CampaignEvent:
     eta_seconds: float | None = None
     history: tuple[GenerationRecord, ...] = ()
     harmonics: tuple[tuple[int, float, float], ...] = ()
+    margin_by_layer: tuple[LayerMarginRecord, ...] = ()
     margin_by_block: tuple[BlockMarginRecord, ...] = ()
+    evaluation_fidelity: EvaluationFidelity | None = None
 
 
 class CampaignRunner:
@@ -142,24 +148,47 @@ class CampaignRunner:
             generation, total_generations, design, margin_percent, harmonic_units, family_count
         ):  # noqa: ANN001
             harmonics: tuple[tuple[int, float, float], ...] = ()
+            margin_by_layer: tuple[LayerMarginRecord, ...] = ()
             margin_by_block: tuple[BlockMarginRecord, ...] = ()
-            if design is not None:
+            displayed_margin_percent: float | None = None
+            displayed_harmonic_units: float | None = None
+            evaluation_fidelity: EvaluationFidelity | None = None
+            if (
+                design is not None
+                and margin_percent is not None
+                and harmonic_units is not None
+            ):
+                evaluation_fidelity = targets.certification_fidelity
                 try:
                     harmonics = harmonic_table(
                         design,
                         targets.r_ref_mm,
                         targets.max_order,
-                        targets.search_fidelity,
+                        targets.certification_fidelity,
                     )
+                    displayed_harmonic_units = _worst_harmonic_residual(
+                        harmonics,
+                        targets,
+                    )
+                except (KeyError, ValueError, ZeroDivisionError):
+                    harmonics = ()
+                    displayed_harmonic_units = None
+                try:
                     margin_by_block = load_line_margin_by_block_detail(
                         design,
                         targets.cadata_by_layer,
                         targets.temperature_k,
-                        fidelity=targets.search_fidelity,
+                        fidelity=targets.certification_fidelity,
                     )
+                    margin_by_layer = _layer_margins_from_blocks(margin_by_block)
+                    if margin_by_layer:
+                        displayed_margin_percent = min(
+                            record.margin_percent for record in margin_by_layer
+                        )
                 except (KeyError, ValueError, ZeroDivisionError):
-                    harmonics = ()
+                    margin_by_layer = ()
                     margin_by_block = ()
+                    displayed_margin_percent = None
             total_turns = (
                 sum(
                     block.n_turns
@@ -174,31 +203,56 @@ class CampaignRunner:
             # optimistic and every callback is charged to the next generation.
             tracker.record(
                 generation,
-                margin_percent,
-                harmonic_units,
+                displayed_margin_percent,
+                displayed_harmonic_units,
                 family_count,
                 total_turns=total_turns,
             )
+            if displayed_margin_percent is not None:
+                message = (
+                    f"generation {generation}/{total_generations}: selected candidate "
+                    f"margin {displayed_margin_percent:.2f}%"
+                )
+                if displayed_harmonic_units is not None:
+                    message += (
+                        ", harmonic residual "
+                        f"{displayed_harmonic_units:.2f} units"
+                    )
+                else:
+                    message += ", harmonic diagnostic unavailable"
+            elif displayed_harmonic_units is not None:
+                message = (
+                    f"generation {generation}/{total_generations}: selected candidate "
+                    "harmonic residual "
+                    f"{displayed_harmonic_units:.2f} units, margin diagnostic unavailable"
+                )
+            elif design is not None:
+                message = (
+                    f"generation {generation}/{total_generations}: selected geometry "
+                    "has no physical results available yet"
+                )
+            else:
+                message = (
+                    f"generation {generation}/{total_generations}: "
+                    "no physical candidate yet"
+                )
             self.events.put(
                 CampaignEvent(
                     kind="generation",
-                    message=(
-                        f"generation {generation}/{total_generations}: "
-                        f"best margin {margin_percent:.2f}%"
-                        if margin_percent is not None
-                        else f"generation {generation}/{total_generations}: no candidate decoded yet"
-                    ),
+                    message=message,
                     generation=generation,
                     total_generations=total_generations,
                     design=design,
-                    margin_percent=margin_percent,
-                    harmonic_units=harmonic_units,
+                    margin_percent=displayed_margin_percent,
+                    harmonic_units=displayed_harmonic_units,
                     topology_family_count=family_count,
                     elapsed_seconds=tracker.elapsed_seconds,
                     eta_seconds=tracker.eta_seconds,
                     history=tuple(tracker.history),
                     harmonics=harmonics,
+                    margin_by_layer=margin_by_layer,
                     margin_by_block=margin_by_block,
+                    evaluation_fidelity=evaluation_fidelity,
                 )
             )
 
@@ -223,8 +277,6 @@ class CampaignRunner:
                 pop_size=pop_size,
                 n_gen=n_gen,
                 seed=seed,
-                topology_survival=topology_survival,
-                adaptive_offspring=True,
                 on_generation=_on_generation,
                 should_stop=self._stop_requested.is_set,
                 n_workers=n_workers,
@@ -266,20 +318,54 @@ def _gui_topology_survival_config(
     topology: Topology,
     pop_size: int,
 ) -> TopologySurvivalConfig:
-    """Preserve a population-scaled floor of active-block topology families."""
+    """Backward-compatible GUI alias for the shared campaign policy."""
 
-    possible_families = math.prod(
-        layer.n_blocks - layer.min_blocks + 1 for layer in topology.layers
-    )
-    family_floor = min(
-        possible_families,
-        pop_size,
-        max(4, min(32, pop_size // 4)),
-    )
-    if possible_families <= 1 or family_floor <= 1:
-        return TopologySurvivalConfig(enabled=False)
-    return TopologySurvivalConfig(
-        enabled=True,
-        min_families=family_floor,
-        max_survivors_per_family=max(1, math.ceil(pop_size / family_floor)),
+    return recommended_topology_survival_config(topology, pop_size)
+
+
+def _worst_harmonic_residual(
+    harmonics: tuple[tuple[int, float, float], ...],
+    targets: OptimizationTargets,
+) -> float:
+    """Reduce an already evaluated harmonic table using campaign semantics."""
+
+    target_by_order = dict(targets.harmonic_targets)
+    if targets.harmonic_orders:
+        wanted = set(targets.harmonic_orders)
+        values = [
+            abs(normal - target_by_order.get(order, 0.0))
+            for order, normal, _skew in harmonics
+            if order in wanted
+        ]
+    else:
+        values = [
+            value
+            for order, normal, skew in harmonics
+            if order >= 2
+            for value in (abs(normal), abs(skew))
+        ]
+    if not values:
+        raise ValueError("harmonic table contains no requested orders")
+    return max(values)
+
+
+def _layer_margins_from_blocks(
+    records: tuple[BlockMarginRecord, ...],
+) -> tuple[LayerMarginRecord, ...]:
+    """Derive per-layer limiting records without repeating the peak-field solve."""
+
+    limiting_by_layer: dict[int, BlockMarginRecord] = {}
+    for record in records:
+        current = limiting_by_layer.get(record.layer_index)
+        if current is None or record.margin_percent < current.margin_percent:
+            limiting_by_layer[record.layer_index] = record
+    return tuple(
+        LayerMarginRecord(
+            layer_index=record.layer_index,
+            peak_field_t=record.peak_field_t,
+            operating_current_a=record.operating_current_a,
+            short_sample_current_a=record.short_sample_current_a,
+            margin_percent=record.margin_percent,
+        )
+        for _layer_index, record in sorted(limiting_by_layer.items())
     )

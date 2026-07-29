@@ -262,3 +262,32 @@ def test_block_turns_keep_radius_when_width_stack_reaches_pole() -> None:
         )
     )
     assert radii == pytest.approx((30.0, 30.0, 30.0, 30.0))
+
+
+def test_block_turns_reuses_exact_immutable_geometry() -> None:
+    block = Block(
+        phi_deg=17.0,
+        alpha_deg=19.0,
+        n_turns=4,
+        cable=CableSpec(
+            width_inner_mm=1.2,
+            width_outer_mm=1.4,
+            height_mm=14.0,
+        ),
+        inner_radius_mm=28.0,
+        current_a=1.0,
+    )
+
+    first = block.turns()
+    second = block.turns()
+    equal_block = Block(
+        phi_deg=block.phi_deg,
+        alpha_deg=block.alpha_deg,
+        n_turns=block.n_turns,
+        cable=block.cable,
+        inner_radius_mm=block.inner_radius_mm,
+        current_a=block.current_a,
+    )
+
+    assert second is first
+    assert equal_block.turns() is first

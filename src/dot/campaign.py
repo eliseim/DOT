@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
+import platform
+import sys
 from dataclasses import asdict, dataclass
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
+from dot import __version__
 from dot.conductors import resolve_conductor
 from dot.geometry import CableSpec, midplane_anchors_from_gaps
 from dot.optimize import LayerConductorData, LayerTopology, Topology
@@ -23,7 +27,6 @@ class CampaignRunSettings:
     generations: int
     seeds: tuple[int, ...]
     workers: int
-    adaptive_offspring: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +90,9 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
                 remfit=resolution.remfit,
             )
         )
-        fixed_radius = _optional_positive(item.get("inner_radius_mm"), f"layers[{index}].inner_radius_mm")
+        fixed_radius = _optional_positive(
+            item.get("inner_radius_mm"), f"layers[{index}].inner_radius_mm"
+        )
         radius_bounds = None
         if fixed_radius is not None:
             radius_bounds = (fixed_radius, fixed_radius)
@@ -124,9 +129,7 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
                 "inner_radius_bounds_mm": radius_bounds,
                 "phi_bounds_deg": phi_bounds,
                 "alpha_bounds_deg": alpha_bounds,
-                "n_turns_bounds": _int_pair(
-                    item["turn_bounds"], f"layers[{index}].turn_bounds"
-                ),
+                "n_turns_bounds": _int_pair(item["turn_bounds"], f"layers[{index}].turn_bounds"),
                 "inner_radius_mm": fixed_radius,
                 "first_block_phi_deg": first_block_phi,
                 "first_block_alpha_deg": first_block_alpha,
@@ -145,10 +148,14 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
             for index, row in enumerate(layer_rows)
         )
         legacy_first_gap = layer_rows[0].get("radial_gap_mm")
-        if legacy_first_gap is not None and _finite_nonnegative(
-            legacy_first_gap,
-            "layers[0].radial_gap_mm",
-        ) != 0.0:
+        if (
+            legacy_first_gap is not None
+            and _finite_nonnegative(
+                legacy_first_gap,
+                "layers[0].radial_gap_mm",
+            )
+            != 0.0
+        ):
             raise ValueError(
                 "layers[0].radial_gap_mm must be omitted: Layer 1 R is the aperture radius"
             )
@@ -165,9 +172,7 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
             azimuthal_gaps,
             radial_gaps,
         )
-        for parameters, (radius, phi, alpha) in zip(
-            layer_parameters, anchors, strict=True
-        ):
+        for parameters, (radius, phi, alpha) in zip(layer_parameters, anchors, strict=True):
             parameters["inner_radius_bounds_mm"] = (radius, radius)
             parameters["inner_radius_mm"] = radius
             parameters["first_block_phi_deg"] = phi
@@ -197,13 +202,18 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
         cables=cables,
     )
     search_fidelity = _fidelity(
-        acceptance.get("search_fidelity"), "search-v2", bore_default=3, peak_default=8
+        acceptance.get("search_fidelity"),
+        "search-v3-gauss",
+        bore_default=3,
+        peak_default=8,
+        bore_quadrature_default="gauss-legendre",
     )
     certification_fidelity = _fidelity(
         acceptance.get("certification_fidelity"),
         "certify-v1",
         bore_default=12,
         peak_default=80,
+        bore_quadrature_default="midpoint",
     )
     targets = OptimizationTargets(
         target_bore_field_t=_finite_positive(magnet["target_bore_field_t"], "target_bore_field_t"),
@@ -222,6 +232,7 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
         min_margin_percent=_optional_nonnegative(
             acceptance.get("min_margin_percent"), "min_margin_percent"
         ),
+        min_current_a=_optional_nonnegative(acceptance.get("min_current_a"), "min_current_a"),
         max_current_a=_optional_positive(acceptance.get("max_current_a"), "max_current_a"),
         max_total_turns=_optional_positive_int(
             acceptance.get("max_total_turns"), "max_total_turns"
@@ -229,11 +240,13 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
         max_turns_per_layer=_optional_positive_int(
             acceptance.get("max_turns_per_layer"), "max_turns_per_layer"
         ),
-        pareto_search=_search_mode(acceptance.get("search_mode", "annealed")),
         search_fidelity=search_fidelity,
         certification_fidelity=certification_fidelity,
     )
-    enforce_layer_nesting = bool(geometry.get("enforce_layer_nesting", True))
+    enforce_layer_nesting = _boolean(
+        geometry.get("enforce_layer_nesting", True),
+        "geometry.enforce_layer_nesting",
+    )
     default_nesting_repair = 15.0 if enforce_layer_nesting else None
     feasibility = FeasibilitySettings(
         min_gap_mm=_finite_nonnegative(geometry["midplane_gap_mm"], "midplane_gap_mm"),
@@ -277,7 +290,6 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
         generations=_positive_int(optimization["generations"], "optimization.generations"),
         seeds=tuple(int(seed) for seed in seeds_raw),
         workers=_positive_int(optimization.get("workers", 1), "optimization.workers"),
-        adaptive_offspring=bool(optimization.get("adaptive_offspring", True)),
     )
     return CampaignDefinition(
         name,
@@ -304,6 +316,7 @@ def result_document(
         "source_config": str(campaign.source_path),
         "model_boundary": "two-dimensional coil-only/no-iron magnetostatics",
         "inputs": _input_manifest(campaign),
+        "software": _software_manifest(),
         "configured_run": asdict(campaign.run),
         "quick_run": quick,
         "reference_radius_mm": campaign.targets.r_ref_mm,
@@ -320,6 +333,8 @@ def result_document(
                 "max_normalized_violation": item.max_violation,
                 "normalized_violations": dict(item.normalized_violations),
                 "search_objectives": {
+                    # Backward-compatible schema-v1 alias; both keys intentionally
+                    # contain the same residual value.
                     "worst_harmonic_units": item.search_objectives[0],
                     "worst_harmonic_residual_units": item.search_objectives[0],
                     "negative_margin_percent": item.search_objectives[1],
@@ -353,13 +368,13 @@ def _candidate_document(index, candidate) -> dict[str, Any]:  # noqa: ANN001
         "rank_index": index,
         "certified": candidate.certified,
         "objectives": {
+            # Backward-compatible schema-v1 alias; both keys intentionally
+            # contain the same residual value.
             "worst_harmonic_units": candidate.objectives[0],
             "worst_harmonic_residual_units": candidate.objectives[0],
             "minimum_margin_percent": -candidate.objectives[1],
         },
-        "harmonic_targets": {
-            f"b{order}": target for order, target in candidate.harmonic_targets
-        },
+        "harmonic_targets": {f"b{order}": target for order, target in candidate.harmonic_targets},
         "operating_current_a": candidate.operating_current_a,
         "harmonics": [
             {
@@ -428,10 +443,31 @@ def _input_manifest(campaign: CampaignDefinition) -> list[dict[str, str]]:
     ]
 
 
+def _software_manifest() -> dict[str, Any]:
+    package_versions = {}
+    for distribution in ("dot", "numpy", "matplotlib", "pymoo", "numba", "scipy"):
+        try:
+            package_versions[distribution] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            package_versions[distribution] = None
+    return {
+        "dot_version": __version__,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "packages": package_versions,
+    }
+
+
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
     value = parent.get(key)
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be an object")
+    return value
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a JSON boolean")
     return value
 
 
@@ -536,9 +572,7 @@ def _harmonic_targets(
         try:
             order = _positive_int(text, "acceptance.harmonic_targets order")
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"invalid harmonic target key {raw_order!r}; use b3, b5, ..."
-            ) from exc
+            raise ValueError(f"invalid harmonic target key {raw_order!r}; use b3, b5, ...") from exc
         if order not in harmonic_orders:
             raise ValueError(
                 f"harmonic target b{order} is not listed in acceptance.harmonic_orders"
@@ -552,26 +586,26 @@ def _harmonic_targets(
     return tuple((order, parsed[order]) for order in harmonic_orders if order in parsed)
 
 
-def _search_mode(value: Any) -> bool:
-    mode = str(value).strip().lower()
-    if mode not in {"annealed", "pareto"}:
-        raise ValueError("acceptance.search_mode must be 'annealed' or 'pareto'")
-    return mode == "pareto"
-
-
 def _fidelity(
     value: Any,
     default_name: str,
     *,
     bore_default: int,
     peak_default: int,
+    bore_quadrature_default: str,
 ) -> EvaluationFidelity:
     if value is None:
-        return EvaluationFidelity(default_name, bore_default, peak_default)
+        return EvaluationFidelity(
+            default_name,
+            bore_default,
+            peak_default,
+            bore_quadrature_default,
+        )
     if not isinstance(value, dict):
         raise ValueError("fidelity must be an object")
     return EvaluationFidelity(
         str(value.get("name", default_name)),
         _positive_int(value.get("bore_filaments_per_axis", bore_default), "bore fidelity"),
         _positive_int(value.get("peak_filaments_per_axis", peak_default), "peak fidelity"),
+        str(value.get("bore_quadrature", bore_quadrature_default)),
     )

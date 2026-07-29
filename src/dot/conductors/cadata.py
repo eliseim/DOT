@@ -277,8 +277,8 @@ def parse_cadata_text(
     * ``CONDUCTOR``:
       ``No Name Type Cable Strand Filament Insul Transient QuenchMat T_o Comment``
 
-    Other sections and trailing human-readable header rows are ignored. By
-    By default, supported REMFIT rows are parsed and unsupported rows are
+    Other sections and trailing descriptive header rows are ignored. By
+    default, supported REMFIT rows are parsed and unsupported rows are
     preserved in ``unsupported_remfits``.  Selecting a named unsupported fit
     still raises :class:`UnsupportedFitTypeError`.
     """

@@ -3,11 +3,17 @@ from __future__ import annotations
 import math
 import os
 import re
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from dot.conductors import load_line_margin_percent, solve_short_sample_current
 from dot.conductors.cadata import resolve_conductor
 from dot.geometry import Block, CableSpec, DipoleDesign, Layer
 from dot.geometry.constraints import check_feasibility
@@ -20,20 +26,18 @@ pytestmark = pytest.mark.live_roxie
 
 ROXIE_SERVICE_URL = os.environ.get("ROXIE_SERVICE_URL", "http://127.0.0.1:8080")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-ROXIE_TEMPLATE = Path(
-    os.environ.get(
-        "DOT_ROXIE_TEMPLATE",
-        "C:/Users/elisei/Desktop/dipole_designer/10042026_CTH-14T.data",
-    )
-)
+_ROXIE_TEMPLATE_ENV = os.environ.get("DOT_ROXIE_TEMPLATE")
+ROXIE_TEMPLATE = Path(_ROXIE_TEMPLATE_ENV) if _ROXIE_TEMPLATE_ENV else None
 ROXIE_CADATA = Path(
     os.environ.get(
         "DOT_ROXIE_CADATA",
-        str(REPOSITORY_ROOT / "benchmarks" / "cth14t_no_iron" / "cth14t.cadata"),
+        str(REPOSITORY_ROOT / "campaign" / "dot_cables.cadata"),
     )
 )
 FIELD_TOLERANCE_REL = 0.02
 MARGIN_TOLERANCE_PERCENTAGE_POINTS = 2.0
+FIT_PARITY_FIELD_TOLERANCE_REL = 0.03
+FIT_PARITY_MARGIN_TOLERANCE_PERCENTAGE_POINTS = 0.05
 
 CURRENT_A = 12238.0
 CTH_HF = CableSpec(
@@ -234,6 +238,92 @@ def test_live_roxie_peak_field_and_margin_parity_cth_hf_and_mixed(tmp_path: Path
     assert all(
         comparison.margin_error_percentage_points < MARGIN_TOLERANCE_PERCENTAGE_POINTS
         for comparison in comparisons
+    )
+
+
+@pytest.mark.parametrize(
+    ("fit_name", "remfit_row"),
+    (
+        (
+            "MQXFS5",
+            "  2 MQXFS5 11     1.6051E+11           30           16         0.96 "
+            "        1.52          0.5            2            0            0            0 "
+            "           0 'PIT 192 MQXFS5'",
+        ),
+        (
+            "PIT192",
+            "  2 PIT192 11     1.7834E+11           30           16         0.96 "
+            "        1.52          0.5            2            0            0            0 "
+            "           0 'PIT 192 REF'",
+        ),
+    ),
+)
+def test_live_roxie_margin_parity_for_non_cth_supported_type11_fits(
+    tmp_path: Path,
+    fit_name: str,
+    remfit_row: str,
+) -> None:
+    """Exercise every supported non-CTH type-11 coefficient set in ROXIE.
+
+    Each case makes a controlled copy of the already validated CTH_HF fixture
+    and replaces only its HFM1 REMFIT row and filament link.  Cable, strand,
+    insulation, geometry, current, and temperature therefore remain identical;
+    only the critical-surface coefficients change in both engines.
+    """
+
+    _require_live_roxie()
+    source = ROXIE_CADATA.read_text(encoding="utf-8", errors="replace")
+    replacement_body = re.sub(r"^\s*\d+\s+", "", remfit_row)
+    replacement, count = re.subn(
+        r"(?m)^(\s*\d+\s+)HFM1\s+11\s+.*$",
+        rf"\g<1>{replacement_body}",
+        source,
+    )
+    assert count == 1, "expected one HFM1 REMFIT row in the validated fixture"
+    replacement = re.sub(
+        r"(?m)^(\s*\d+\s+QXF89H_HF\s+56\s+0\s+)HFM1\s+HFM1\b",
+        rf"\g<1>{fit_name} {fit_name}",
+        replacement,
+    )
+    catalogue_dir = tmp_path / f"{fit_name.lower()}_catalogue"
+    catalogue_dir.mkdir()
+    cadata_file = catalogue_dir / "cth14t.cadata"
+    cadata_file.write_text(replacement, encoding="utf-8", newline="\n")
+
+    resolution = resolve_conductor(
+        cadata_file.read_text(encoding="utf-8", errors="replace"),
+        "CTH_HF",
+    )
+    assert resolution.is_resolved, resolution.message
+    assert resolution.remfit_name == fit_name
+    cable = resolution.cable_spec()
+    unit_design = _cth_margin_design(((34.0, 5.0, 20, cable),))
+
+    comparison = _cth_peak_and_margin_comparison(
+        tmp_path,
+        f"{fit_name.lower()}_20turn_3t",
+        unit_design,
+        ("CTH_HF",),
+        cadata_file=cadata_file,
+        target_field_t=3.0,
+        evaluate_dot_margin_on_roxie_peak=True,
+    )
+
+    print(f"\n--- {fit_name} non-CTH fit parity ---")
+    print(
+        f"DOT peak={comparison.dot_peak_t:.6f} T; "
+        f"ROXIE peak={comparison.roxie_peak_t:.6f} T; "
+        f"relative error={100.0 * comparison.peak_relative_error:.4f}%"
+    )
+    print(
+        f"DOT margin={comparison.dot_margin_percent:.6f}%; "
+        f"ROXIE margin={comparison.roxie_margin_percent:.6f}%; "
+        f"error={comparison.margin_error_percentage_points:.4f} percentage points"
+    )
+    assert comparison.peak_relative_error < FIT_PARITY_FIELD_TOLERANCE_REL
+    assert (
+        comparison.margin_error_percentage_points
+        < FIT_PARITY_MARGIN_TOLERANCE_PERCENTAGE_POINTS
     )
 
 
@@ -517,20 +607,30 @@ def _cth_peak_and_margin_comparison(
     case_name: str,
     unit_current_design: DipoleDesign,
     conductor_names_by_layer: tuple[str, ...],
+    *,
+    cadata_file: Path = ROXIE_CADATA,
+    target_field_t: float = 1.0,
+    evaluate_dot_margin_on_roxie_peak: bool = False,
 ) -> LiveMarginComparison:
-    solved = operating_point(unit_current_design, 1.0)
+    solved = operating_point(unit_current_design, target_field_t)
     records = tuple(
         _cth_margin_block_record(number, block, conductor_names_by_layer[layer_index])
         for number, (layer_index, block) in enumerate(_all_indexed_blocks(solved.design), start=1)
     )
-    data_file = _write_no_iron_data_file(tmp_path, case_name, records, r_ref_mm=25.0)
+    data_file = _write_no_iron_data_file(
+        tmp_path,
+        case_name,
+        records,
+        r_ref_mm=25.0,
+        cadata_file=cadata_file,
+    )
     output_dir = tmp_path / f"{case_name}_output"
     output_dir.mkdir()
-    output_file = _run_roxie_output(data_file, output_dir)
+    output_file = _run_roxie_output(data_file, output_dir, cadata_file=cadata_file)
     roxie_peak_t, roxie_loadline_percent = _parse_peak_and_loadline(output_file)
     roxie_margin_percent = 100.0 - roxie_loadline_percent
 
-    cadata_text = ROXIE_CADATA.read_text(encoding="utf-8", errors="replace")
+    cadata_text = cadata_file.read_text(encoding="utf-8", errors="replace")
     conductors = tuple(resolve_conductor(cadata_text, conductor_name) for conductor_name in conductor_names_by_layer)
     for conductor_name, conductor in zip(conductor_names_by_layer, conductors, strict=True):
         if not conductor.is_resolved:
@@ -543,12 +643,29 @@ def _cth_peak_and_margin_comparison(
         )
         for conductor in conductors
     )
-    dot_margin_percent = load_line_margin_objective(
-        solved.design,
-        cable_specs_by_layer=tuple(layer.blocks[0].cable for layer in solved.design.layers),
-        cadata_by_layer=cadata_by_layer,
-        temperature_k=conductors[0].temperature_k,
-    )
+    if evaluate_dot_margin_on_roxie_peak:
+        if len(conductors) != 1:
+            raise ValueError("fit-only parity requires exactly one conductor")
+        conductor = conductors[0]
+        operating_current_a = abs(solved.design.layers[0].blocks[0].current_a)
+        short_sample_current_a = solve_short_sample_current(
+            conductor.remfit,
+            conductor.strand,
+            conductor.cable,
+            temperature_k=conductor.temperature_k,
+            k_field_per_current=roxie_peak_t / operating_current_a,
+        )
+        dot_margin_percent = load_line_margin_percent(
+            operating_current_a,
+            short_sample_current_a,
+        )
+    else:
+        dot_margin_percent = load_line_margin_objective(
+            solved.design,
+            cable_specs_by_layer=tuple(layer.blocks[0].cable for layer in solved.design.layers),
+            cadata_by_layer=cadata_by_layer,
+            temperature_k=conductors[0].temperature_k,
+        )
     _, dot_peak_t = _peak_field_on_own_turns(solved.design, evaluated_layers=tuple(range(len(solved.design.layers))))
     return LiveMarginComparison(
         case_name=case_name,
@@ -668,14 +785,20 @@ def _write_no_iron_data_file(
     case_name: str,
     block_records: tuple[RoxieBlockRecord, ...],
     r_ref_mm: float,
+    *,
+    cadata_file: Path = ROXIE_CADATA,
 ) -> Path:
-    if not ROXIE_TEMPLATE.exists():
-        pytest.skip(f"ROXIE template is unavailable: {ROXIE_TEMPLATE}")
-    if not ROXIE_CADATA.exists():
-        pytest.skip(f"ROXIE cable data is unavailable: {ROXIE_CADATA}")
+    template = ROXIE_TEMPLATE
+    if template is None:
+        pytest.skip("ROXIE template is unavailable; set DOT_ROXIE_TEMPLATE")
+    if not template.exists():
+        pytest.skip(f"ROXIE template is unavailable: {template}")
+    if not cadata_file.exists():
+        pytest.skip(f"ROXIE cable data is unavailable: {cadata_file}")
 
-    lines = ROXIE_TEMPLATE.read_text(encoding="utf-8").splitlines()
+    lines = template.read_text(encoding="utf-8").splitlines()
     lines[2] = _quoted_roxie_path("none")
+    lines[3] = _quoted_roxie_path(cadata_file.name)
     lines[4] = _quoted_roxie_path("none")
     lines = [
         line.replace("LBEMFEM=T", "LBEMFEM=F").replace("LIRON=T", "LIRON=F")
@@ -738,25 +861,110 @@ def _run_roxie_main_field(data_file: Path, output_dir: Path) -> float:
     return _parse_main_field(_run_roxie_output(data_file, output_dir))
 
 
-def _run_roxie_output(data_file: Path, output_dir: Path) -> Path:
-    try:
-        from roxieapi.tool_adapter.RoxieToolAdapter import RestRoxieToolAdapter
-    except Exception as exc:
-        pytest.skip(f"roxieapi REST adapter is unavailable: {exc}")
-
-    adapter = RestRoxieToolAdapter(
-        service_url=ROXIE_SERVICE_URL,
-        input_files=[data_file, ROXIE_CADATA],
-        session=_TimeoutSession(),
+def _run_roxie_output(
+    data_file: Path,
+    output_dir: Path,
+    *,
+    cadata_file: Path = ROXIE_CADATA,
+) -> Path:
+    model_name = data_file.stem
+    encoded_model_name = urllib.parse.quote(model_name, safe="")
+    initialized = _roxie_json_request(f"/model/{encoded_model_name}", data=b"")
+    timestamp = str(initialized["timestamp"])
+    body, content_type = _multipart_form_data(
+        fields={"model_name": model_name, "timestamp": timestamp},
+        files=(data_file, cadata_file),
     )
-    return_code = adapter.run()
-    if return_code != 0:
-        pytest.fail(f"ROXIE REST run failed with return code {return_code}\n{adapter.errors}")
-    adapter.download_artefacts(output_dir, "*.output")
-    output_files = tuple(output_dir.glob("*.output"))
-    if not output_files:
-        pytest.fail("ROXIE REST run did not produce a .output artefact")
-    return output_files[0]
+    _roxie_json_request(
+        "/model/",
+        data=body,
+        headers={"Content-Type": content_type},
+    )
+    result = _roxie_json_request(
+        f"/model/{encoded_model_name}/{urllib.parse.quote(timestamp, safe='')}/run",
+        data=b"",
+    )
+    if not bool(result.get("status")):
+        pytest.fail(f"ROXIE REST run failed for {model_name}: {result.get('output', result)}")
+    artefacts = tuple(str(name) for name in result.get("artefacts", ()))
+    output_name = next((name for name in artefacts if name.endswith(".output")), None)
+    if output_name is None:
+        listing = _roxie_json_request(
+            f"/artefacts/{encoded_model_name}/{urllib.parse.quote(timestamp, safe='')}"
+        )
+        output_name = next(
+            (str(name) for name in listing.get("artefacts", ()) if str(name).endswith(".output")),
+            None,
+        )
+    if output_name is None:
+        pytest.fail(f"ROXIE REST run did not produce a .output artefact: {artefacts}")
+    url = (
+        f"{ROXIE_SERVICE_URL.rstrip('/')}/artefact/{encoded_model_name}/"
+        f"{urllib.parse.quote(timestamp, safe='')}/{urllib.parse.quote(output_name, safe='')}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=120.0) as response:  # noqa: S310
+            content = response.read()
+    except (OSError, urllib.error.URLError) as exc:
+        pytest.fail(f"could not download ROXIE output artefact: {exc}")
+    destination = output_dir / output_name
+    destination.write_bytes(content)
+    return destination
+
+
+def _roxie_json_request(
+    endpoint: str,
+    *,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        f"{ROXIE_SERVICE_URL.rstrip('/')}{endpoint}",
+        data=data,
+        headers=headers or {},
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120.0) as response:  # noqa: S310
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        pytest.fail(f"ROXIE REST request failed for {endpoint}: HTTP {exc.code}: {details}")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        pytest.fail(f"ROXIE REST request failed for {endpoint}: {exc}")
+
+
+def _multipart_form_data(
+    *,
+    fields: dict[str, str],
+    files: tuple[Path, ...],
+) -> tuple[bytes, str]:
+    boundary = f"dot-parity-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode(),
+                b"\r\n",
+            )
+        )
+    for path in files:
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                (
+                    f'Content-Disposition: form-data; name="files"; '
+                    f'filename="{path.name}"\r\n'
+                ).encode(),
+                b"Content-Type: application/octet-stream\r\n\r\n",
+                path.read_bytes(),
+                b"\r\n",
+            )
+        )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
 def _parse_main_field(output_file: Path) -> float:
@@ -787,23 +995,9 @@ def _parse_peak_and_loadline(output_file: Path) -> tuple[float, float]:
 
 
 def _require_live_roxie() -> None:
-    requests = pytest.importorskip("requests", reason="requests is needed for ROXIE REST probing")
     try:
-        response = requests.get(ROXIE_SERVICE_URL, timeout=1.0)
-        response.raise_for_status()
-    except Exception as exc:
+        with urllib.request.urlopen(ROXIE_SERVICE_URL, timeout=1.0) as response:  # noqa: S310
+            if response.status >= 400:
+                raise OSError(f"HTTP {response.status}")
+    except (OSError, urllib.error.URLError) as exc:
         pytest.skip(f"ROXIE REST service is unreachable at {ROXIE_SERVICE_URL}: {exc}")
-
-
-class _TimeoutSession:
-    def __init__(self) -> None:
-        requests = pytest.importorskip("requests", reason="requests is needed for ROXIE REST")
-        self._session = requests.Session()
-
-    def get(self, *args: object, **kwargs: object) -> object:
-        kwargs.setdefault("timeout", 120.0)
-        return self._session.get(*args, **kwargs)
-
-    def post(self, *args: object, **kwargs: object) -> object:
-        kwargs.setdefault("timeout", 120.0)
-        return self._session.post(*args, **kwargs)

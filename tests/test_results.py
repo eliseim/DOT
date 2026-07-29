@@ -19,6 +19,7 @@ from dot.results import (
     export_campaign_results,
     export_no_candidate_result,
     inter_block_clearance_rows,
+    candidate_summary_figure,
 )
 
 
@@ -273,3 +274,15 @@ def test_no_candidate_export_shortlists_uncertified_search_front(tmp_path) -> No
     assert manifest["source"] == "uncertified_search_front"
     assert manifest["design_count"] == 1
     assert manifest["designs"][0]["certified"] is False
+
+
+def test_uncertified_summary_image_title_omits_search_design_warning() -> None:
+    figure = candidate_summary_figure(
+        replace(_candidate(), certified=False),
+        campaign_name="near-miss",
+        reference_radius_mm=5.0,
+    )
+
+    title = figure._suptitle.get_text()
+    assert "UNCERTIFIED SEARCH DESIGN" not in title
+    assert "near-miss" in title

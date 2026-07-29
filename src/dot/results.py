@@ -577,7 +577,9 @@ def candidate_summary_figure(
         conductor_labels=conductor_labels,
     )
     family = str(document["topology_family"])
-    certification = "CERTIFIED" if candidate.certified else "UNCERTIFIED SEARCH DESIGN"
+    title_parts = [heading, campaign_name, family]
+    if candidate.certified:
+        title_parts.append("CERTIFIED")
     figure = Figure(figsize=(15.5, 11.0), constrained_layout=True)
     grid = figure.add_gridspec(
         2,
@@ -590,7 +592,7 @@ def candidate_summary_figure(
     geometry_axes = figure.add_subplot(grid[1, :])
 
     figure.suptitle(
-        f"{heading} — {campaign_name} — {family} — {certification}",
+        " — ".join(title_parts),
         fontsize=15,
         fontweight="bold",
     )

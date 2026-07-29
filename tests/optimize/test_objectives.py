@@ -139,24 +139,16 @@ def test_load_line_margin_objective_matches_direct_loadline_solver_inputs() -> N
     assert actual == pytest.approx(expected, rel=1.0e-12, abs=1.0e-12)
 
 
-def test_load_line_margin_skips_unsupported_layers_before_peak_search() -> None:
+def test_load_line_margin_rejects_an_unsupported_layer() -> None:
     design = _two_layer_design(current_a=250.0)
 
-    overall_turn, _ = _peak_field_on_own_turns(design)
-    evaluated_turn, _ = _peak_field_on_own_turns(design, evaluated_layers=(1,))
-    margin = load_line_margin_objective(
-        design,
-        cable_specs_by_layer=(
-            design.layers[0].blocks[0].cable,
-            design.layers[1].blocks[0].cable,
-        ),
-        cadata_by_layer=(None, conductor_data()),
-        temperature_k=0.0,
-    )
-
-    assert overall_turn.layer_index == 0
-    assert evaluated_turn.layer_index == 1
-    assert margin > 0.0
+    with pytest.raises(ValueError, match="supported conductor data for every layer"):
+        load_line_margin_objective(
+            design,
+            cable_specs_by_layer=(),
+            cadata_by_layer=(None, conductor_data()),  # type: ignore[arg-type]
+            temperature_k=0.0,
+        )
 
 
 def test_load_line_margin_detail_identifies_conductor_limited_outer_layer() -> None:
@@ -192,12 +184,12 @@ def test_load_line_margin_detail_identifies_conductor_limited_outer_layer() -> N
     assert overall_margin == pytest.approx(by_layer[1].margin_percent)
 
 
-def test_load_line_margin_requires_at_least_one_supported_layer() -> None:
-    with pytest.raises(ValueError, match="requires conductor data"):
+def test_load_line_margin_requires_one_supported_record_per_layer() -> None:
+    with pytest.raises(ValueError, match="supported conductor data for every layer"):
         load_line_margin_objective(
             _two_layer_design(current_a=250.0),
             cable_specs_by_layer=(),
-            cadata_by_layer=(None, None),
+            cadata_by_layer=(None, None),  # type: ignore[arg-type]
             temperature_k=0.0,
         )
 

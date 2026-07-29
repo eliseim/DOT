@@ -70,6 +70,50 @@ def test_inter_layer_spacing_rejects_radially_overlapping_layers() -> None:
     assert violations[0].severity == pytest.approx(0.1)
 
 
+def test_inter_layer_spacing_uses_radial_build_for_generated_tilted_cables() -> None:
+    cable = CableSpec(
+        height_mm=1.5,
+        width_inner_mm=10.0,
+        width_outer_mm=12.0,
+        insulation_radial_mm=0.0,
+        insulation_azimuthal_mm=0.0,
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=28.0,
+        layers=(
+            _layer(inner_radius_mm=35.0, phi_deg=10.0, alpha_deg=-15.0, cable=cable),
+            _layer(inner_radius_mm=37.0, phi_deg=10.0, alpha_deg=-15.0, cable=cable),
+        ),
+    )
+
+    assert check_inter_layer_spacing(design, min_clearance_mm=0.5) == []
+
+
+def test_feasibility_always_enforces_compact_first_quadrant() -> None:
+    cable = CableSpec(width_mm=1.0, height_mm=1.0, insulation_thickness_mm=0.0)
+    design = DipoleDesign(
+        aperture_radius_mm=28.0,
+        layers=(
+            _layer(
+                inner_radius_mm=35.0,
+                phi_deg=120.0,
+                alpha_deg=120.0,
+                cable=cable,
+            ),
+        ),
+    )
+
+    result = check_feasibility(
+        design,
+        aperture_radius_mm=28.0,
+        min_gap_mm=0.0,
+        min_layer_clearance_mm=0.0,
+    )
+
+    assert not result.is_feasible
+    assert any(row.constraint_name == "pole_clearance" for row in result.violations)
+
+
 def test_check_feasibility_does_not_compare_layer_global_radial_extrema() -> None:
     inner_turn = TurnPolygon(
         corners=((-1.0, 10.0), (1.0, 10.0), (1.0, 12.0), (-1.0, 12.0)),
@@ -417,6 +461,30 @@ def test_turn_non_intersection_accepts_edge_contact_between_stacked_turns() -> N
     assert check_turn_non_intersection(design) == []
 
 
+def test_turn_non_intersection_accepts_valid_multiturn_keystoned_stack() -> None:
+    cable = CableSpec(
+        width_inner_mm=1.736,
+        width_outer_mm=2.084,
+        height_mm=16.17,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    block = Block(
+        phi_deg=55.0,
+        alpha_deg=0.0,
+        n_turns=4,
+        cable=cable,
+        inner_radius_mm=35.0,
+        current_a=1000.0,
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=20.0,
+        layers=(Layer(inner_radius_mm=35.0, blocks=(block,)),),
+    )
+
+    assert check_turn_non_intersection(design, tolerance_mm=0.0) == []
+
+
 def test_turn_non_intersection_rejects_positive_area_polygon_overlap() -> None:
     cable = CableSpec(width_mm=2.0, height_mm=2.0, insulation_thickness_mm=0.0)
     first = Block(
@@ -617,13 +685,19 @@ def _valid_two_layer_design() -> DipoleDesign:
     )
 
 
-def _layer(*, inner_radius_mm: float, phi_deg: float, cable: CableSpec) -> Layer:
+def _layer(
+    *,
+    inner_radius_mm: float,
+    phi_deg: float,
+    cable: CableSpec,
+    alpha_deg: float = 0.0,
+) -> Layer:
     return Layer(
         inner_radius_mm=inner_radius_mm,
         blocks=(
             Block(
                 phi_deg=phi_deg,
-                alpha_deg=0.0,
+                alpha_deg=alpha_deg,
                 n_turns=1,
                 cable=cable,
                 inner_radius_mm=inner_radius_mm,

@@ -10,8 +10,13 @@ import numpy as np
 from dot.geometry import DipoleDesign, Layer
 from dot.geometry.constraints import check_feasibility
 from dot.optimize.objectives import EvaluationFidelity, harmonic_table, load_line_margin_detail
-from dot.optimize.operating_point import operating_point
-from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
+from dot.optimize.problem import (
+    FeasibilitySettings,
+    OptimizationTargets,
+    current_range_violation,
+    fixed_current_field_violation,
+    solve_operating_point,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +94,7 @@ def monte_carlo_robustness(
             samples.append(RobustnessSample(False, False, None, None, None))
             continue
         try:
-            solved = operating_point(perturbed, targets.target_bore_field_t)
+            solved = solve_operating_point(perturbed, targets)
             harmonics = harmonic_table(
                 solved.design,
                 targets.r_ref_mm,
@@ -110,10 +115,20 @@ def monte_carlo_robustness(
             )
             margin = min(row.margin_percent for row in margins)
             current = abs(solved.operating_current_a)
+            current_passes = (
+                fixed_current_field_violation(solved, targets) <= 0.0
+                if targets.fixed_current_a is not None
+                else current_range_violation(
+                    current,
+                    targets.min_current_a,
+                    targets.max_current_a,
+                )
+                <= 0.0
+            )
             passes = (
                 (targets.max_harmonic_units is None or harmonic <= targets.max_harmonic_units)
                 and (targets.min_margin_percent is None or margin >= targets.min_margin_percent)
-                and (targets.max_current_a is None or current <= targets.max_current_a)
+                and current_passes
             )
             samples.append(RobustnessSample(True, passes, harmonic, margin, current))
         except (KeyError, ValueError, ZeroDivisionError):
@@ -139,7 +154,9 @@ def monte_carlo_robustness(
         specification_pass_fraction=sum(row.meets_specification for row in samples) / n_samples,
         harmonic_p95_units=p95,
         harmonic_cvar95_units=cvar95,
-        margin_p05_percent=(float(np.quantile(valid_margins, 0.05)) if valid_margins.size else None),
+        margin_p05_percent=(
+            float(np.quantile(valid_margins, 0.05)) if valid_margins.size else None
+        ),
     )
 
 
@@ -163,20 +180,22 @@ def finite_difference_harmonic_sensitivities(
                 plus = _perturb_one(design, layer_index, block_index, parameter, delta_deg)
                 minus = _perturb_one(design, layer_index, block_index, parameter, -delta_deg)
                 plus_table = harmonic_table(
-                    operating_point(plus, targets.target_bore_field_t).design,
+                    solve_operating_point(plus, targets).design,
                     targets.r_ref_mm,
                     targets.max_order,
                     evaluation_fidelity,
                 )
                 minus_table = harmonic_table(
-                    operating_point(minus, targets.target_bore_field_t).design,
+                    solve_operating_point(minus, targets).design,
                     targets.r_ref_mm,
                     targets.max_order,
                     evaluation_fidelity,
                 )
                 minus_by_order = {order: normal for order, normal, _skew in minus_table}
                 for order, normal_plus, _skew in plus_table:
-                    if order < 2 or (targets.harmonic_orders and order not in targets.harmonic_orders):
+                    if order < 2 or (
+                        targets.harmonic_orders and order not in targets.harmonic_orders
+                    ):
                         continue
                     records.append(
                         HarmonicSensitivity(

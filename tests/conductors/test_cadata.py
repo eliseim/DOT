@@ -11,6 +11,9 @@ from dot.conductors import (
 )
 from dot.conductors.cadata import Type11FitCoefficients, find_type1_remfit, resolve_conductor
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+CTH_CADATA = REPOSITORY_ROOT / "campaign" / "dot_cables.cadata"
+
 
 def test_parse_cadata_text_extracts_strand_cable_and_type1_remfit() -> None:
     text = """
@@ -113,9 +116,8 @@ REMFIT 2
     assert exc_info.value.name == "NB3SNA"
 
 
-def test_real_roxie_cth_file_resolves_type1_fit_by_name() -> None:
-    path = Path(r"C:\Users\elisei\Desktop\dipole_designer\roxie_CTH_cables.cadata")
-    text = path.read_text(encoding="utf-8")
+def test_bundled_cth_file_resolves_type1_fit_by_name() -> None:
+    text = CTH_CADATA.read_text(encoding="utf-8")
 
     remfit = find_type1_remfit(text, "FIT1")
 
@@ -130,9 +132,8 @@ def test_real_roxie_cth_file_resolves_type1_fit_by_name() -> None:
     )
 
 
-def test_real_roxie_cth_file_resolves_named_conductor_links() -> None:
-    path = Path(r"C:\Users\elisei\Desktop\dipole_designer\roxie_CTH_cables.cadata")
-    text = path.read_text(encoding="utf-8")
+def test_bundled_cth_file_resolves_named_conductor_links() -> None:
+    text = CTH_CADATA.read_text(encoding="utf-8")
 
     lf = resolve_conductor(text, "CTH_LF")
     hf = resolve_conductor(text, "CTH_HF")
@@ -141,7 +142,7 @@ def test_real_roxie_cth_file_resolves_named_conductor_links() -> None:
     assert lf.conductor is not None
     assert lf.conductor.cable_name == "CTH_CERN"
     assert lf.conductor.strand_name == "STR01_12"
-    assert lf.conductor.remfit_name == "NBTILHC"
+    assert lf.conductor.quench_material_name == "NBTILHC"
     assert lf.remfit_name == "FIT1"
     assert lf.temperature_k == pytest.approx(1.9)
     assert lf.strand is not None
@@ -163,7 +164,7 @@ def test_real_roxie_cth_file_resolves_named_conductor_links() -> None:
     assert hf.status == "resolved"
     assert hf.conductor is not None
     assert hf.conductor.cable_name == "CXF150HT5"
-    assert hf.conductor.remfit_name == "NB3SNMP"
+    assert hf.conductor.quench_material_name == "NB3SNMP"
     assert hf.remfit_name == "HFM1"
     assert hf.temperature_k == pytest.approx(1.9)
     assert hf.strand is not None

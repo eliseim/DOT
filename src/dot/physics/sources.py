@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
+
+import numpy as np
 
 from dot.geometry import Point, TurnPolygon
 
@@ -34,25 +37,51 @@ def place_line_current_sources(
     turn: TurnPolygon,
     n1: int = 3,
     n2: int = 3,
+    *,
+    quadrature: str = "midpoint",
 ) -> tuple[LineCurrentSource, ...]:
-    """Discretize one turn into ``n1`` by ``n2`` equal-current filaments.
+    """Discretize one turn into an ``n1`` by ``n2`` current quadrature.
 
     ``n1`` subdivides the inner-to-outer height direction and ``n2`` subdivides
-    the cable-width direction.  The source position is the bilinear cell center
-    and each source carries ``turn.current_a / (n1 * n2)``.
+    the cable-width direction. ``midpoint`` preserves the traditional
+    equal-current cell-centre grid. ``gauss-legendre`` uses tensor-product
+    Gauss-Legendre nodes and weights on the same bilinear turn coordinates;
+    it resolves smooth bore multipoles much more accurately for the same
+    filament count. Near-field/load-line calculations continue to use the
+    midpoint grid because singular-field sampling has different convergence
+    behaviour.
     """
 
     _require_positive_int(n1, "n1")
     _require_positive_int(n2, "n2")
-    source_current = turn.current_a / (n1 * n2)
+    height_axis = _quadrature_axis(n1, quadrature)
+    width_axis = _quadrature_axis(n2, quadrature)
     sources: list[LineCurrentSource] = []
-    for row in range(n1):
-        v = (row + 0.5) / n1
-        for column in range(n2):
-            u = (column + 0.5) / n2
+    for v, height_weight in height_axis:
+        for u, width_weight in width_axis:
             x, y = _bilinear(turn.corners, u, v)
-            sources.append(LineCurrentSource(x, y, source_current))
+            sources.append(
+                LineCurrentSource(
+                    x,
+                    y,
+                    turn.current_a * height_weight * width_weight,
+                )
+            )
     return tuple(sources)
+
+
+@lru_cache(maxsize=32)
+def _quadrature_axis(order: int, quadrature: str) -> tuple[tuple[float, float], ...]:
+    if quadrature == "midpoint":
+        weight = 1.0 / order
+        return tuple(((index + 0.5) / order, weight) for index in range(order))
+    if quadrature == "gauss-legendre":
+        nodes, weights = np.polynomial.legendre.leggauss(order)
+        return tuple(
+            (float((node + 1.0) / 2.0), float(weight / 2.0))
+            for node, weight in zip(nodes, weights, strict=True)
+        )
+    raise ValueError("quadrature must be 'midpoint' or 'gauss-legendre'")
 
 
 def _bilinear(corners: tuple[Point, Point, Point, Point], u: float, v: float) -> Point:

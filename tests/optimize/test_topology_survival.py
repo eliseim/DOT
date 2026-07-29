@@ -74,6 +74,50 @@ def test_topology_aware_survival_disabled_by_default_matches_plain_rank_and_crow
     assert "b" not in {ind.get("topology_family") for ind in survivors}
 
 
+def test_topology_aware_survival_preserves_families_when_every_candidate_is_infeasible() -> None:
+    families = np.array(["a", "a", "a", "b", "c", "d"], dtype=object)
+    pop = Population.new(X=np.arange(6, dtype=float)[:, None])
+    pop.set("F", np.column_stack((np.arange(6.0), np.arange(6.0))))
+    pop.set("G", np.asarray([[0.01], [0.02], [0.03], [0.5], [0.6], [0.7]]))
+    pop.set("topology_family", families)
+    survival = TopologyAwareRankAndCrowding(
+        TopologySurvivalConfig(
+            enabled=True,
+            min_families=4,
+            max_survivors_per_family=1,
+        )
+    )
+
+    survivors = survival.do(
+        _ConstrainedProblem(),
+        pop,
+        n_survive=4,
+        random_state=np.random.RandomState(0),
+    )
+
+    assert {row.get("topology_family") for row in survivors} == {"a", "b", "c", "d"}
+    assert all(float(row.CV[0]) > 0.0 for row in survivors)
+
+
+def test_topology_aware_survival_never_sacrifices_feasible_for_family_quota() -> None:
+    pop = Population.new(X=np.arange(4, dtype=float)[:, None])
+    pop.set("F", np.asarray([[1.0, 2.0], [2.0, 1.0], [0.0, 0.0], [0.0, 0.0]]))
+    pop.set("G", np.asarray([[0.0], [0.0], [0.01], [0.02]]))
+    pop.set("topology_family", np.array(["a", "a", "b", "c"], dtype=object))
+    survival = TopologyAwareRankAndCrowding(
+        TopologySurvivalConfig(enabled=True, min_families=3)
+    )
+
+    survivors = survival.do(
+        _ConstrainedProblem(),
+        pop,
+        n_survive=2,
+        random_state=np.random.RandomState(0),
+    )
+
+    assert [float(row.CV[0]) for row in survivors] == [0.0, 0.0]
+
+
 def test_run_campaign_with_topology_survival_keeps_more_than_one_family() -> None:
     topology = _optional_block_topology()
     targets = OptimizationTargets(
@@ -81,7 +125,7 @@ def test_run_campaign_with_topology_survival_keeps_more_than_one_family() -> Non
         r_ref_mm=5.0,
         max_order=4,
         cadata_by_layer=(conductor_data(),),
-        temperature_k=0.0,
+        temperature_k=1.9,
     )
 
     result = run_campaign(
@@ -91,10 +135,15 @@ def test_run_campaign_with_topology_survival_keeps_more_than_one_family() -> Non
         pop_size=16,
         n_gen=3,
         seed=5,
-        topology_survival=TopologySurvivalConfig(enabled=True, min_families=2),
     )
 
     assert result.candidates
+
+
+class _ConstrainedProblem:
+    @staticmethod
+    def has_constraints() -> bool:
+        return True
 
 
 def _optional_block_topology() -> Topology:

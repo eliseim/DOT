@@ -1,4 +1,4 @@
-"""Topology-family diversity preservation for NSGA-II survival (task 0045).
+"""Topology-family diversity preservation for NSGA-II survival.
 
 Plain rank-and-crowding selection can let one decoded phenotype (active-
 block pattern per layer) dominate the population before structurally
@@ -12,13 +12,21 @@ representative per missing family before the normal rank/crowding fill.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+from pymoo.core.population import Population
+from pymoo.core.survival import split_by_feasibility
 from pymoo.operators.survival.rank_and_crowding.classes import RankAndCrowding
+from pymoo.util import default_random_state
 from pymoo.util.randomized_argsort import randomized_argsort
 
 from dot.geometry import DipoleDesign
+
+if TYPE_CHECKING:
+    from .genome import Topology
 
 
 def topology_family(design: DipoleDesign) -> str:
@@ -43,6 +51,33 @@ class TopologySurvivalConfig:
     min_families: int = 4
 
 
+def recommended_topology_survival_config(
+    topology: Topology,
+    pop_size: int,
+) -> TopologySurvivalConfig:
+    """Return DOT's population-scaled topology-diversity policy.
+
+    The same policy is shared by GUI and command-line campaigns so equivalent
+    inputs cannot silently use different NSGA-II survival behavior.
+    """
+
+    possible_families = math.prod(
+        layer.n_blocks - layer.min_blocks + 1 for layer in topology.layers
+    )
+    family_floor = min(
+        possible_families,
+        pop_size,
+        max(4, min(32, pop_size // 4)),
+    )
+    if possible_families <= 1 or family_floor <= 1:
+        return TopologySurvivalConfig(enabled=False)
+    return TopologySurvivalConfig(
+        enabled=True,
+        min_families=family_floor,
+        max_survivors_per_family=max(1, math.ceil(pop_size / family_floor)),
+    )
+
+
 class TopologyAwareRankAndCrowding(RankAndCrowding):
     """Rank-and-crowding survival with a per-generation topology-family quota.
 
@@ -64,6 +99,105 @@ class TopologyAwareRankAndCrowding(RankAndCrowding):
     def __init__(self, config: TopologySurvivalConfig, nds=None, crowding_func: str = "cd") -> None:
         super().__init__(nds=nds, crowding_func=crowding_func)
         self.config = config
+
+    @default_random_state
+    def do(
+        self,
+        problem,
+        pop,
+        *args,
+        n_survive=None,
+        random_state=None,
+        return_indices=False,
+        **kwargs,
+    ):  # noqa: ANN001, ANN003
+        """Preserve topology families without weakening constraint precedence.
+
+        Pymoo normally removes infeasible individuals before calling ``_do``.
+        That keeps feasible designs first, but used to bypass DOT's topology
+        quota during the common all-infeasible early generations.  Select the
+        feasible pool first and then apply the same family-aware policy to the
+        constraint-violation-ordered infeasible remainder.
+        """
+
+        if not self.config.enabled:
+            return super().do(
+                problem,
+                pop,
+                *args,
+                n_survive=n_survive,
+                random_state=random_state,
+                return_indices=return_indices,
+                **kwargs,
+            )
+        if len(pop) == 0:
+            return [] if return_indices else pop
+
+        n_survive = min(len(pop), len(pop) if n_survive is None else n_survive)
+        families = pop.get("topology_family")
+        if families is None:
+            return super().do(
+                problem,
+                pop,
+                *args,
+                n_survive=n_survive,
+                random_state=random_state,
+                return_indices=return_indices,
+                **kwargs,
+            )
+
+        selected_indices: list[int] = []
+        family_counts: dict[str, int] = {}
+        if problem is not None and problem.has_constraints():
+            feasible, infeasible = split_by_feasibility(pop, sort_infeas_by_cv=True)
+            if len(feasible):
+                feasible_survivors = self._do(
+                    problem,
+                    pop[feasible],
+                    *args,
+                    n_survive=min(len(feasible), n_survive),
+                    random_state=random_state,
+                    **kwargs,
+                )
+                original_index = {
+                    individual: int(index) for index, individual in enumerate(pop)
+                }
+                selected_indices.extend(
+                    original_index[individual] for individual in feasible_survivors
+                )
+                for index in selected_indices:
+                    family = str(families[index])
+                    family_counts[family] = family_counts.get(family, 0) + 1
+
+            remaining = n_survive - len(selected_indices)
+            if remaining > 0:
+                selected_indices.extend(
+                    self._quota_fill(
+                        [int(index) for index in infeasible],
+                        families,
+                        remaining,
+                        initial_family_counts=family_counts,
+                    )
+                )
+        else:
+            selected_indices = self._do(
+                problem,
+                pop,
+                *args,
+                n_survive=n_survive,
+                random_state=random_state,
+                **kwargs,
+            )
+            if return_indices:
+                original_index = {
+                    individual: int(index) for index, individual in enumerate(pop)
+                }
+                return [original_index[individual] for individual in selected_indices]
+            return selected_indices
+
+        if return_indices:
+            return selected_indices
+        return pop[selected_indices] if selected_indices else Population()
 
     def _do(self, problem, pop, *args, random_state=None, n_survive=None, **kwargs):  # noqa: ANN001, ANN003
         if not self.config.enabled:
@@ -97,17 +231,24 @@ class TopologyAwareRankAndCrowding(RankAndCrowding):
         survivors = self._quota_fill(ordered_indices, families, n_survive)
         return pop[survivors]
 
-    def _quota_fill(self, ordered_indices: list[int], families: np.ndarray, n_survive: int) -> list[int]:
+    def _quota_fill(
+        self,
+        ordered_indices: list[int],
+        families: np.ndarray,
+        n_survive: int,
+        *,
+        initial_family_counts: dict[str, int] | None = None,
+    ) -> list[int]:
         survivors: list[int] = []
-        family_counts: dict[str, int] = {}
-        seen_families: set[str] = set()
+        family_counts = dict(initial_family_counts or {})
+        seen_families = set(family_counts)
 
         # Pass 1: one representative per not-yet-seen family, best-ranked
         # first, up to min_families -- guarantees the diversity floor.
         for i in ordered_indices:
             if len(survivors) >= n_survive or len(seen_families) >= self.config.min_families:
                 break
-            family = families[i]
+            family = str(families[i])
             if family in seen_families:
                 continue
             survivors.append(i)
@@ -122,7 +263,7 @@ class TopologyAwareRankAndCrowding(RankAndCrowding):
                 break
             if i in survivors_set:
                 continue
-            family = families[i]
+            family = str(families[i])
             if cap is not None and family_counts.get(family, 0) >= cap:
                 continue
             survivors.append(i)

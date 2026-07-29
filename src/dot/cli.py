@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from dot.campaign import load_campaign, result_document
@@ -39,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.command == "gui":
         from dot.gui.target_synthesis_gui import main as gui_main
 
@@ -53,15 +55,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    configured_population = args.population or campaign.run.population
-    configured_generations = args.generations or campaign.run.generations
+    for option_name, value in (
+        ("--population", args.population),
+        ("--generations", args.generations),
+        ("--workers", args.workers),
+    ):
+        if value is not None and value < 1:
+            parser.error(f"{option_name} must be a positive integer")
+
+    configured_population = (
+        args.population if args.population is not None else campaign.run.population
+    )
+    configured_generations = (
+        args.generations if args.generations is not None else campaign.run.generations
+    )
     configured_seeds = tuple(args.seed) if args.seed else campaign.run.seeds
     population = min(configured_population, 12) if args.quick else configured_population
     generations = min(configured_generations, 3) if args.quick else configured_generations
     seeds = configured_seeds[:1] if args.quick else configured_seeds
-    workers = 1 if args.quick else (args.workers or campaign.run.workers)
-    adaptive_offspring = False if args.quick else campaign.run.adaptive_offspring
-    args.output.mkdir(parents=True, exist_ok=True)
+    configured_workers = args.workers if args.workers is not None else campaign.run.workers
+    workers = 1 if args.quick else min(configured_workers, _worker_limit())
+    try:
+        _prepare_output_directory(args.output)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     conductor_labels = tuple(str(row["conductor"]) for row in campaign.raw["layers"])
     results: list[ParetoResult] = []
     for seed_index, seed in enumerate(seeds, start=1):
@@ -121,7 +138,6 @@ def main(argv: list[str] | None = None) -> int:
             pop_size=population,
             n_gen=generations,
             seed=seed,
-            adaptive_offspring=adaptive_offspring,
             n_workers=workers,
             on_generation=_on_generation,
         )
@@ -148,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
         "generations": generations,
         "seeds": seeds,
         "workers": workers,
-        "adaptive_offspring": adaptive_offspring,
     }
     destination.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     if merged.candidates:
@@ -190,6 +205,25 @@ def _design_current(design) -> float:  # noqa: ANN001
         for block in layer.blocks:
             return abs(block.current_a)
     return 0.0
+
+
+def _worker_limit() -> int:
+    hardware_limit = max(1, os.cpu_count() or 1)
+    return min(hardware_limit, 61) if os.name == "nt" else hardware_limit
+
+
+def _prepare_output_directory(output: Path) -> None:
+    """Create a new run directory or reject a path containing stale artifacts."""
+
+    if output.exists():
+        if not output.is_dir():
+            raise ValueError(f"output path is not a directory: {output}")
+        if any(output.iterdir()):
+            raise ValueError(
+                f"output directory must be empty so results cannot mix with an earlier run: {output}"
+            )
+        return
+    output.mkdir(parents=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,263 @@
+{
+  "case_count": 1000,
+  "coverage": {
+    "aperture_radius_mm": {
+      "maximum": 39.96817509485862,
+      "minimum": 20.003739817418587
+    },
+    "conductor_patterns": [
+      "CTH_HF|CTH_HF",
+      "CTH_HF|CTH_HF|CTH_HF|CTH_HF",
+      "CTH_HF|CTH_HF|CTH_LF|CTH_LF",
+      "CTH_HF|CTH_HF|YELLONIN|YELLONOU",
+      "CTH_HF|CTH_LF",
+      "CTH_LF|CTH_LF",
+      "YELLONIN|YELLONIN|YELLONOU|YELLONOU",
+      "YELLONIN|YELLONOU"
+    ],
+    "current_a": {
+      "maximum": 12454.821539332703,
+      "minimum": 3008.318211387924
+    },
+    "total_blocks": {
+      "maximum": 12.0,
+      "minimum": 2.0
+    },
+    "total_turns": {
+      "maximum": 44.0,
+      "minimum": 5.0
+    }
+  },
+  "error_definitions": {
+    "field_error_percent": "100*(DOT-ROXIE)/abs(ROXIE)",
+    "harmonic_error_units": "DOT b_n - ROXIE b_n, accelerator units",
+    "margin_error_pp": "DOT margin - ROXIE margin, percentage points"
+  },
+  "four_layer": {
+    "b11_error_units": {
+      "absolute_max": 0.19023635108360626,
+      "absolute_mean": 0.03263714016101732,
+      "absolute_median": 0.02819407333813667,
+      "absolute_p95": 0.07855601126426351,
+      "count": 500,
+      "signed_mean": 0.007084135209013417
+    },
+    "b3_error_units": {
+      "absolute_max": 3.6749074985722245,
+      "absolute_mean": 1.038805214289811,
+      "absolute_median": 1.0231740061703931,
+      "absolute_p95": 2.191155731933769,
+      "count": 500,
+      "signed_mean": 0.7169925712114442
+    },
+    "b5_error_units": {
+      "absolute_max": 2.0528894854257125,
+      "absolute_mean": 0.5243716745109547,
+      "absolute_median": 0.4905251206012162,
+      "absolute_p95": 1.123491998671888,
+      "count": 500,
+      "signed_mean": -0.04430171927987794
+    },
+    "b7_error_units": {
+      "absolute_max": 0.8917975905973154,
+      "absolute_mean": 0.21658023714253727,
+      "absolute_median": 0.19045901523731557,
+      "absolute_p95": 0.5250787382862269,
+      "count": 500,
+      "signed_mean": -0.05283787194631677
+    },
+    "b9_error_units": {
+      "absolute_max": 0.32588087744214533,
+      "absolute_mean": 0.08092800972610294,
+      "absolute_median": 0.07041450658513693,
+      "absolute_p95": 0.1977745445228762,
+      "count": 500,
+      "signed_mean": -0.00027852119295927535
+    },
+    "bore_field_relative_error_percent": {
+      "absolute_max": 0.07837045313724246,
+      "absolute_mean": 0.02001605801571742,
+      "absolute_median": 0.017059525053148356,
+      "absolute_p95": 0.05039533503436998,
+      "count": 500,
+      "signed_mean": 0.018841571979637692
+    },
+    "loadline_margin_error_percentage_points": {
+      "absolute_max": 0.4071270933303168,
+      "absolute_mean": 0.10154435616966803,
+      "absolute_median": 0.08845819587013182,
+      "absolute_p95": 0.251921619510384,
+      "count": 500,
+      "signed_mean": -0.04096858994603933
+    },
+    "peak_field_relative_error_percent": {
+      "absolute_max": 1.5663000158028868,
+      "absolute_mean": 0.6004354312455011,
+      "absolute_median": 0.5937049993992827,
+      "absolute_p95": 0.9657149727209552,
+      "count": 500,
+      "signed_mean": 0.5864036554533367
+    }
+  },
+  "four_layer_cases": 500,
+  "harmonic_orders": [
+    3,
+    5,
+    7,
+    9,
+    11
+  ],
+  "input_hashes_sha256": {
+    "cadata": "129eb7ee809369c87233d0cd08a8640dddb132f8ec959dc8adaa136f2d767eb4",
+    "roxie_template": "24e8b019ad424571070fef0268a0e2a9ab5eba83659e9fb1bc36ffcb78a11074"
+  },
+  "numerical_fidelity": {
+    "dot_bore_filaments_per_axis": 12,
+    "dot_bore_quadrature": "midpoint",
+    "dot_peak_filaments_per_axis": 80,
+    "roxie_block_n1": 2,
+    "roxie_block_n2_by_conductor": {
+      "CTH_HF": 20,
+      "CTH_LF": 15,
+      "YELLONIN": 20,
+      "YELLONOU": 20
+    }
+  },
+  "overall": {
+    "b11_error_units": {
+      "absolute_max": 0.2546920073520813,
+      "absolute_mean": 0.04055214048676966,
+      "absolute_median": 0.03511344099288927,
+      "absolute_p95": 0.10106039654351193,
+      "count": 1000,
+      "signed_mean": 0.0052866589557692845
+    },
+    "b3_error_units": {
+      "absolute_max": 4.81903195677296,
+      "absolute_mean": 1.2145592635003017,
+      "absolute_median": 1.1118527833384633,
+      "absolute_p95": 2.7980410204598227,
+      "count": 1000,
+      "signed_mean": 0.8079775926906705
+    },
+    "b5_error_units": {
+      "absolute_max": 2.42376098972799,
+      "absolute_mean": 0.6507207984773383,
+      "absolute_median": 0.5738156928198883,
+      "absolute_p95": 1.5251811652493534,
+      "count": 1000,
+      "signed_mean": -0.01318852752504469
+    },
+    "b7_error_units": {
+      "absolute_max": 1.7254451693196309,
+      "absolute_mean": 0.27253976742530084,
+      "absolute_median": 0.23138759659630015,
+      "absolute_p95": 0.7011447151942902,
+      "count": 1000,
+      "signed_mean": -0.05022667121300331
+    },
+    "b9_error_units": {
+      "absolute_max": 0.5853663874572637,
+      "absolute_mean": 0.10345606249652359,
+      "absolute_median": 0.08374122238688608,
+      "absolute_p95": 0.26100603022751084,
+      "count": 1000,
+      "signed_mean": -0.0032791203731371683
+    },
+    "bore_field_relative_error_percent": {
+      "absolute_max": 0.09881538976948681,
+      "absolute_mean": 0.019673170774223498,
+      "absolute_median": 0.015570149877059451,
+      "absolute_p95": 0.05252143447938499,
+      "count": 1000,
+      "signed_mean": 0.018090308445556678
+    },
+    "loadline_margin_error_percentage_points": {
+      "absolute_max": 0.6035348770585784,
+      "absolute_mean": 0.11401829200319835,
+      "absolute_median": 0.10186957281494458,
+      "absolute_p95": 0.27846757134230204,
+      "count": 1000,
+      "signed_mean": -0.02434683735608774
+    },
+    "peak_field_relative_error_percent": {
+      "absolute_max": 2.114892480447391,
+      "absolute_mean": 0.6709153965459251,
+      "absolute_median": 0.6726798812105378,
+      "absolute_p95": 1.1866124302343237,
+      "count": 1000,
+      "signed_mean": 0.6234810690441492
+    }
+  },
+  "roxie_service_endpoint": "http://127.0.0.1:8080",
+  "schema_version": 1,
+  "seed": 20260729,
+  "study": "DOT 1.0.0 versus ROXIE 23.6/26.1.0.b3, 2D coil-only no iron",
+  "two_layer": {
+    "b11_error_units": {
+      "absolute_max": 0.2546920073520813,
+      "absolute_mean": 0.048467140812522,
+      "absolute_median": 0.042723973211845734,
+      "absolute_p95": 0.12078979659483095,
+      "count": 500,
+      "signed_mean": 0.003489182702525151
+    },
+    "b3_error_units": {
+      "absolute_max": 4.81903195677296,
+      "absolute_mean": 1.3903133127107927,
+      "absolute_median": 1.2271108812297484,
+      "absolute_p95": 3.1771622847928596,
+      "count": 500,
+      "signed_mean": 0.8989626141698968
+    },
+    "b5_error_units": {
+      "absolute_max": 2.42376098972799,
+      "absolute_mean": 0.7770699224437221,
+      "absolute_median": 0.7396366858987662,
+      "absolute_p95": 1.776796975196257,
+      "count": 500,
+      "signed_mean": 0.01792466422978856
+    },
+    "b7_error_units": {
+      "absolute_max": 1.7254451693196309,
+      "absolute_mean": 0.3284992977080644,
+      "absolute_median": 0.28135304433637565,
+      "absolute_p95": 0.7633567516107005,
+      "count": 500,
+      "signed_mean": -0.04761547047968985
+    },
+    "b9_error_units": {
+      "absolute_max": 0.5853663874572637,
+      "absolute_mean": 0.12598411526694422,
+      "absolute_median": 0.10768827412559379,
+      "absolute_p95": 0.3015277082049292,
+      "count": 500,
+      "signed_mean": -0.006279719553315061
+    },
+    "bore_field_relative_error_percent": {
+      "absolute_max": 0.09881538976948681,
+      "absolute_mean": 0.019330283532729572,
+      "absolute_median": 0.013658564440764402,
+      "absolute_p95": 0.05668526666670467,
+      "count": 500,
+      "signed_mean": 0.01733904491147566
+    },
+    "loadline_margin_error_percentage_points": {
+      "absolute_max": 0.6035348770585784,
+      "absolute_mean": 0.12649222783672867,
+      "absolute_median": 0.10847244410501133,
+      "absolute_p95": 0.3118202692089167,
+      "count": 500,
+      "signed_mean": -0.007725084766136149
+    },
+    "peak_field_relative_error_percent": {
+      "absolute_max": 2.114892480447391,
+      "absolute_mean": 0.7413953618463491,
+      "absolute_median": 0.7238671880709737,
+      "absolute_p95": 1.2381295981873262,
+      "count": 500,
+      "signed_mean": 0.6605584826349616
+    }
+  },
+  "two_layer_cases": 500
+}

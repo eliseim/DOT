@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "geometry_angle_convention": "native-midplane-zero",
+  "name": "7t-nbti-no-iron-sample",
+  "magnet": {
+    "target_bore_field_t": 7.0,
+    "aperture_radius_mm": 28.0,
+    "reference_radius_mm": 18.667,
+    "temperature_k": 1.9,
+    "max_harmonic_order": 11
+  },
+  "acceptance": {
+    "max_harmonic_units": 5.0,
+    "min_margin_percent": 25.0,
+    "max_current_a": 14187.0,
+    "harmonic_orders": [3, 5, 7, 9, 11],
+    "harmonic_targets": {
+      "3": 0.0,
+      "5": 0.0,
+      "7": 0.0,
+      "9": 0.0,
+      "11": 0.0
+    }
+  },
+  "geometry": {
+    "midplane_gap_mm": 0.15,
+    "inter_layer_gap_mm": 0.5,
+    "inter_block_gap_mm": [0.5, 1.0],
+    "min_pole_turn_radius_mm": 7.0,
+    "geometry_tolerance_mm": 0.005,
+    "enforce_layer_nesting": true,
+    "max_nesting_repair_deg": 15.0
+  },
+  "layers": [
+    {
+      "cadata": "dot_cables.cadata",
+      "conductor": "YELLONIN",
+      "max_blocks": 4,
+      "min_blocks": 2,
+      "turn_bounds": [2, 5],
+      "azimuthal_gap_mm": 0.15,
+      "phi_bounds_deg": [0.0, 90.0],
+      "alpha_bounds_deg": [-15.0, 75.0]
+    },
+    {
+      "cadata": "dot_cables.cadata",
+      "conductor": "YELLONOU",
+      "max_blocks": 2,
+      "min_blocks": 1,
+      "turn_bounds": [3, 14],
+      "radial_gap_mm": 0.5,
+      "azimuthal_gap_mm": 0.15,
+      "phi_bounds_deg": [0.0, 90.0],
+      "alpha_bounds_deg": [-15.0, 75.0]
+    }
+  ],
+  "optimization": {
+    "population": 480,
+    "generations": 200,
+    "seeds": [7],
+    "workers": 4
+  },
+  "provenance": {
+    "layout_knowledge_used": false,
+    "note": "The sample contains electromagnetic targets, cable choices, and manufacturability limits but no reference block coordinates or turn allocation."
+  }
+}

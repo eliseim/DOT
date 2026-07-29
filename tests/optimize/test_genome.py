@@ -409,6 +409,20 @@ def test_layer_topology_validates_alpha_bounds_order() -> None:
         )
 
 
+@pytest.mark.parametrize("phi_bounds", [(-1.0, 60.0), (5.0, 91.0)])
+def test_layer_topology_rejects_phi_bounds_outside_first_quadrant(
+    phi_bounds: tuple[float, float],
+) -> None:
+    with pytest.raises(ValueError, match="compact first quadrant"):
+        LayerTopology(
+            cable_id="inner",
+            n_blocks=1,
+            inner_radius_bounds_mm=(10.0, 20.0),
+            phi_bounds_deg=phi_bounds,
+            n_turns_bounds=(1, 5),
+        )
+
+
 def test_layer_topology_validates_min_blocks_not_greater_than_n_blocks() -> None:
     with pytest.raises(ValueError, match="min_blocks must be <= n_blocks"):
         LayerTopology(

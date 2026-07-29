@@ -38,14 +38,19 @@ from .objectives import (
     load_line_margin_by_block_detail,
     load_line_margin_detail,
 )
-from .operating_point import operating_point
 from .problem import (
     DipoleOptimizationProblem,
     FeasibilitySettings,
-    MarginEvaluationExclusion,
     OptimizationTargets,
+    current_range_violation,
+    fixed_current_field_violation,
+    solve_operating_point,
 )
-from .topology_survival import TopologyAwareRankAndCrowding, TopologySurvivalConfig
+from .topology_survival import (
+    TopologyAwareRankAndCrowding,
+    recommended_topology_survival_config,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ParetoCandidate:
@@ -67,7 +72,6 @@ class ParetoResult:
     """Feasible non-dominated candidates from an optimization run."""
 
     candidates: tuple[ParetoCandidate, ...]
-    excluded_margin_layers: tuple[MarginEvaluationExclusion, ...] = ()
     near_feasible: tuple["NearFeasibleCandidate", ...] = ()
     # Rank-zero archive at search fidelity, before immutable acceptance
     # certification.  Keeping this full front is essential when no point is
@@ -104,11 +108,6 @@ def merge_pareto_results(
     """Merge independent seeds into one re-certified nondominated archive."""
 
     candidates = [candidate for result in results for candidate in result.candidates]
-    exclusions = tuple(
-        dict.fromkeys(
-            exclusion for result in results for exclusion in result.excluded_margin_layers
-        )
-    )
     near_feasible = sorted(
         (item for result in results for item in result.near_feasible),
         key=lambda item: (
@@ -121,7 +120,6 @@ def merge_pareto_results(
     )
     return ParetoResult(
         candidates=_certified_nondominated(candidates, topology, targets, feasibility),
-        excluded_margin_layers=exclusions,
         near_feasible=tuple(near_feasible),
         search_front=search_front,
     )
@@ -203,6 +201,13 @@ class ConstructiveMixedVariableSampling(Sampling):
                         active_phi_variables,
                         layer.n_turns_bounds,
                         target_total_turns,
+                        strategy=(
+                            "balanced",
+                            "midplane_weighted",
+                            "pole_weighted",
+                            "random_weighted",
+                        )[(sample_index + layer_index) % 4],
+                        rng=rng,
                     )
                 turn_counts = _sample_turn_counts(sample, layer_index, active_phi_variables)
                 if physics_seed:
@@ -617,87 +622,13 @@ class TurnBudgetRepair(Repair):
             surplus -= reduction
 
 
-class AlphaAlignmentRepair(Repair):
-    """Clamp each free-alpha block's alpha_deg into a window around its own phi.
-
-    Block index 0 has alpha_deg hard-fixed to 0 (see genome.py), valid
-    because genome_bounds() places it nearest the midplane (phi=0deg).
-    Blocks 1..n-1 have a free alpha gene, but ordinary crossover/mutation
-    treats it as independent of phi -- after mating, a block's phi can be
-    repaired to a very different (more pole-ward) value than the alpha
-    gene was tuned for, leaving alpha badly mismatched and producing
-    self-overlapping turns that no other repair catches (phi-ordering and
-    turn-budget repair don't touch alpha_deg at all).
-
-    A turn's axes rotate with alpha only (see primitives.py's
-    absolute-global-frame alpha convention); they align with the block's
-    true local radial direction (cos(phi), sin(phi)) when alpha = phi.
-    Clamping into [target - 15, target] (intersected with the block's own
-    alpha_bounds) keeps blocks close to structurally valid without
-    collapsing the alpha gene to a single deterministic value.
-    """
-
-    _WINDOW_ABOVE_TARGET_DEG = 15.0
-
-    def __init__(self, topology: Topology) -> None:
-        super().__init__()
-        self.topology = topology
-        self._variables = genome_variables(topology)
-
-    def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
-        for sample in x:
-            if not isinstance(sample, dict):
-                continue
-            self._repair_sample(sample)
-        return x
-
-    def _repair_sample(self, sample: dict[str, float | int]) -> None:
-        for variable in self._variables:
-            if (
-                variable.block_index is None
-                or variable.block_index == 0
-                or not variable.name.endswith("_alpha_deg")
-            ):
-                continue
-            phi_name = f"layer_{variable.layer_index}_block_{variable.block_index}_phi_deg"
-            phi = float(sample.get(phi_name, 0.0))
-            target = phi
-            lower, upper = variable.bounds
-            window_lower = max(lower, target - self._WINDOW_ABOVE_TARGET_DEG)
-            window_upper = min(upper, target)
-            current = float(sample[variable.name])
-            if window_lower <= window_upper:
-                sample[variable.name] = float(min(max(current, window_lower), window_upper))
-            else:
-                sample[variable.name] = float(min(max(current, lower), upper))
-
-
 class GroundTruthRepair(Repair):
-    """Final safety-net repair: verify against real check_feasibility, shrink if not.
+    """Verify repaired geometry and reduce turns/blocks until it is feasible.
 
-    PhiOrderingRepair, TurnBudgetRepair, and AlphaAlignmentRepair are all
-    formula-based -- they restore structural invariants (ordering,
-    budgets, an approximate alpha target) without ever calling
-    :func:`check_feasibility` themselves. Confirmed empirically
-    (coordinator) that this is not sufficient: even a single turn built
-    from AlphaAlignmentRepair's "aligned" alpha target can land well
-    outside a real constraint (e.g. ``check_pole_angle_limit``'s
-    minimum-angle-from-pole requirement) for blocks positioned close to a
-    layer's pole-ward bound, because a finite cable width subtends a much
-    larger angle at small angle-from-pole than the formulas account for.
-
-    This mirrors the campaign's own initial-population sampler
-    (``ActiveAwareGrowthSampling``), which uses real ``check_feasibility``
-    as ground truth while growing turns and reliably produces a healthy
-    population -- but nothing did the equivalent after mating. This repair
-    closes that gap: verify the fully-repaired sample against real
-    feasibility, and if still infeasible, greedily shrink it (reduce the
-    most-turn-heavy active non-block-0 block by one turn, or deactivate it
-    once at its lower bound; fall back to block 0 only once no other
-    active block remains) until feasible or a bounded number of attempts
-    is exhausted. A sample that still can't be repaired within that budget
-    is left as-is -- the existing graded/``_PENALTY`` handling in
-    ``DipoleOptimizationProblem`` still applies to it.
+    Formula-based repairs restore ordering, packing, nesting, and turn
+    budgets. This final pass checks the actual turn polygons and greedily
+    simplifies any remaining infeasible winding. Unrepairable samples are
+    left for the problem's graded constraint handling.
     """
 
     _MAX_ATTEMPTS = 40
@@ -935,12 +866,8 @@ class GroundTruthRepair(Repair):
         if not candidates:
             return False
 
-        # Rank candidates by turn count (most turn-heavy first), same
-        # priority as before, but now try each in turn instead of
-        # committing to a single "worst" one -- deactivating the worst
-        # offender can be blocked by its layer's min_blocks floor
-        # (task 0054), in which case the next-worst candidate should still
-        # get a chance rather than leaving the sample unrepaired outright.
+        # Try turn-heavy offenders first. If a layer's minimum block count
+        # prevents deactivation, continue with the next candidate.
         ranked: list[tuple[int, int, str, int, int]] = []
         for layer_index, block_index in candidates:
             turns_name = f"layer_{layer_index}_block_{block_index}_n_turns"
@@ -1017,7 +944,7 @@ class RadialCompactionRepair(Repair):
     ``inner_radius_mm`` is a free continuous gene, sampled/mutated anywhere
     within ``inner_radius_bounds_mm`` -- and nothing else in the repair
     chain or objective rewards sitting near the bottom of that range. A
-    campaign's own admission/feasibility checks only enforce
+    campaign's feasibility checks only enforce
     ``check_inter_layer_spacing``/``check_midplane_clearance`` as MINIMUMS
     (``gap >= min_layer_clearance_mm`` / ``gap >= min_gap_mm``), so a
     candidate with a 13mm radial gap is exactly as "feasible" as one with
@@ -1063,15 +990,9 @@ class RadialCompactionRepair(Repair):
 class MinActiveBlocksRepair(Repair):
     """Reactivate blocks so every layer meets its ``min_blocks`` floor.
 
-    ``ActiveAwareGrowthSampling``-style constructive sampling only sets
-    this floor at generation 0; without repairing it too, mutation's
-    Binary ``active`` gene (bit-flip, can turn a block off) erodes it over
-    generations, and a campaign converges toward whatever sparse topology
-    is easiest to make feasible -- dd's own topology-collapse review found
-    exactly this failure mode and recommends a per-layer minimum active
-    block count (">=2 in L1/L2 so wedge angles exist to cancel
-    harmonics"). This repair is the mechanism that makes ``min_blocks``
-    hold for the whole search, not just the initial population.
+    Constructive sampling sets this floor in generation 1, while mutation
+    can later turn optional blocks off. Applying the repair every generation
+    keeps the campaign's declared topology floor invariant.
     """
 
     def __init__(self, topology: Topology) -> None:
@@ -1126,11 +1047,10 @@ class CampaignRepair(Repair):
     outer layer's blocks, which preserves the ordering/gaps phi-ordering
     repair just established, so it must run after that repair, not before
     it (translating unordered blocks could still leave them unordered).
-    Alpha is deliberately not clamped to a phi-derived heuristic: published
-    ROXIE layouts contain valid blocks outside a narrow alignment window.
-    GroundTruthRepair runs last: it verifies against
-    real check_feasibility and greedily shrinks anything the formula-based
-    repairs above still leave infeasible.
+    Alpha is deliberately not clamped to a phi-derived heuristic because
+    valid cable frames can lie outside a narrow alignment window.
+    GroundTruthRepair runs last: it verifies real turn polygons and greedily
+    simplifies anything the formula-based repairs still leave infeasible.
     """
 
     def __init__(
@@ -1146,6 +1066,19 @@ class CampaignRepair(Repair):
         self._ground_truth = GroundTruthRepair(topology, feasibility)
 
     def _do(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
+        parallel_repair = getattr(problem, "repair_population", None)
+        samples = tuple(sample for sample in x if isinstance(sample, dict))
+        if (
+            callable(parallel_repair)
+            and len(samples) == len(x)
+            and len(samples) >= 8
+            and getattr(problem, "_executor", None) is not None
+        ):
+            repaired = parallel_repair(samples)
+            return np.asarray(repaired, dtype=object)
+        return self._do_serial(problem, x, **kwargs)
+
+    def _do_serial(self, problem, x, **kwargs):  # noqa: ANN001, ANN003
         x = self._contiguous_blocks._do(problem, x, **kwargs)
         x = self._min_active_blocks._do(problem, x, **kwargs)
         x = self._radial_compaction._do(problem, x, **kwargs)
@@ -1159,43 +1092,24 @@ class CampaignRepair(Repair):
             x = self._ground_truth._do(problem, x, **kwargs)
         return x
 
+    def repair_sample(self, sample: dict[str, object]) -> dict[str, object]:
+        """Return one deterministically repaired sample for a process worker."""
 
-def refresh_population_admission(problem: DipoleOptimizationProblem, pop) -> None:  # noqa: ANN001
-    """Re-score a pymoo population's cached F/G against the problem's current
-    admission thresholds.
-
-    ``DipoleOptimizationProblem.admission_thresholds()`` anneals the
-    harmonic/margin/current thresholds by generation (task 0023), but pymoo's
-    NSGA2 never re-evaluates a surviving individual's cached F/G once it is
-    born -- only new offspring are scored under the current generation's
-    threshold. Elitist survival then retains individuals whose G reflects a
-    much looser threshold from whenever they were born, never re-validated
-    against the tightening target: confirmed empirically (task 0042) via a
-    campaign whose final "feasible" individuals had G<=0 (so counted as
-    feasible) while their actual harmonic/margin values were 5-6x off the
-    final target. Calling this once per generation, right after
-    ``problem.set_generation()``, keeps every individual entering the next
-    generation's mating/survival scored under the threshold that is
-    currently active, both for honest reporting and for correct
-    constraint-domination-based selection pressure.
-    """
-
-    x = pop.get("X")
-    if x is None or len(x) == 0:
-        return
-    objectives, constraints = problem.evaluate(x, return_values_of=["F", "G"])
-    pop.set("F", objectives)
-    pop.set("G", constraints)
+        values = np.asarray([sample], dtype=object)
+        repaired = self._do_serial(None, values)
+        return repaired[0]
 
 
 def best_generation_candidate(
     topology: Topology,
     pop,
     targets: OptimizationTargets | None = None,
-) -> tuple[DipoleDesign, tuple[float, float], float] | None:  # noqa: ANN001
+) -> (
+    tuple[DipoleDesign, tuple[float | None, float | None], float | None] | None
+):  # noqa: ANN001
     """Decode the population's best-so-far individual for live GUI reporting.
 
-    Among geometrically/admission-feasible individuals, prefer one that is
+    Among hard-feasible individuals, prefer one that is
     closest to the declared harmonic/margin target box and then balance low
     harmonic against high margin.  This prevents the live GUI from calling a
     zero-margin, low-harmonic extreme the generation's "best" design.  If no
@@ -1227,6 +1141,16 @@ def best_generation_candidate(
     genome = np.asarray(genome, dtype=float)
     unit_design = decode(genome, topology, topology.cables)
     harmonic_units, neg_margin = float(f[best_index, 0]), float(f[best_index, 1])
+    if (
+        not math.isfinite(harmonic_units)
+        or not math.isfinite(neg_margin)
+        or abs(harmonic_units) >= 1.0e11
+        or abs(neg_margin) >= 1.0e11
+    ):
+        # Penalty objectives describe search infeasibility, not measurable
+        # harmonics or margin.  Keep the decoded geometry visible but do not
+        # present a 1e12 sentinel as an electromagnetic result.
+        return unit_design, (None, None), None
     return unit_design, (harmonic_units, neg_margin), -neg_margin
 
 
@@ -1252,8 +1176,6 @@ def run_campaign(
     pop_size: int = 8,
     n_gen: int = 3,
     seed: int | None = None,
-    topology_survival: TopologySurvivalConfig | None = None,
-    adaptive_offspring: bool = False,
     n_workers: int | None = None,
     on_generation: Callable[
         [int, int, DipoleDesign | None, float | None, float | None, int | None],
@@ -1264,29 +1186,14 @@ def run_campaign(
 ) -> ParetoResult:
     """Run a small fixed-topology NSGA-II campaign and return feasible candidates.
 
-    ``on_generation``, if given, is called once per generation with
-    ``(generation, total_generations, best_design_or_None, best_margin_percent_or_None,
-    best_harmonic_units_or_None, topology_family_count_or_None)`` -- the live
-    per-generation best-candidate view dd's GUI has and DOT's lacked (task
-    0052), extended (task 0056) with the harmonic/diversity signal a live
-    convergence chart needs.
+    ``on_generation``, if given, receives the generation, total generations,
+    representative design, margin, harmonic residual, and topology-family count.
     """
 
-    problem = DipoleOptimizationProblem(
-        topology, targets, feasibility, total_generations=n_gen, n_workers=n_workers
-    )
-    algorithm = _mixed_variable_nsga2(
-        topology, feasibility, pop_size, targets, topology_survival, adaptive_offspring
-    )
+    problem = DipoleOptimizationProblem(topology, targets, feasibility, n_workers=n_workers)
+    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets)
 
     def _advance_generation(algorithm) -> None:  # noqa: ANN001
-        problem.set_generation(algorithm.n_gen)
-        # Pareto-search harmonic/margin thresholds are absent from G, while
-        # the current cap is a static hard constraint. Survivors' cached
-        # physics therefore remain valid; re-evaluating the full population
-        # here doubled the dominant load-line work for no numerical change.
-        if not targets.pareto_search:
-            refresh_population_admission(problem, algorithm.pop)
         if on_generation is not None:
             best = None
             margin_percent = None
@@ -1297,10 +1204,12 @@ def run_campaign(
                     design, (raw_harmonic_units, _neg_margin), margin_percent = found
                     harmonic_units = (
                         raw_harmonic_units
-                        if math.isfinite(raw_harmonic_units) and raw_harmonic_units < 1.0e11
+                        if raw_harmonic_units is not None
+                        and math.isfinite(raw_harmonic_units)
+                        and raw_harmonic_units < 1.0e11
                         else None
                     )
-                    scaled = operating_point(design, targets.target_bore_field_t)
+                    scaled = solve_operating_point(design, targets)
                     best = scaled.design
             except (KeyError, ValueError, ZeroDivisionError):
                 best = None
@@ -1328,9 +1237,8 @@ def run_campaign(
     finally:
         problem.close()
 
-    # Do not trust result.X/result.G as final engineering truth: individuals
-    # can have been born under an earlier admission plateau. Reconsider the
-    # whole final population and certify it below against immutable targets.
+    # Search fidelity is intentionally economical. Reconsider the whole final
+    # population and certify it below against immutable targets.
     final_algorithm = getattr(result, "algorithm", None)
     final_population = getattr(final_algorithm, "pop", None)
     pop_x = final_population.get("X") if final_population is not None else None
@@ -1350,35 +1258,34 @@ def run_campaign(
     for genome, objective, constraint in zip(genomes, pop_f, pop_g, strict=False):
         try:
             unit_design = decode(genome, topology, topology.cables)
-            solved = operating_point(unit_design, targets.target_bore_field_t)
+            solved = solve_operating_point(unit_design, targets)
             normalized_violations = [
                 (name, max(0.0, float(value)))
                 for name, value in zip(problem.constraint_names, constraint, strict=True)
             ]
-            if targets.pareto_search:
-                if targets.max_harmonic_units is not None:
-                    normalized_violations.append(
-                        (
-                            "harmonics",
-                            max(
-                                0.0,
-                                (float(objective[0]) - targets.max_harmonic_units)
-                                / max(1.0, abs(targets.max_harmonic_units)),
-                            ),
-                        )
+            if targets.max_harmonic_units is not None:
+                normalized_violations.append(
+                    (
+                        "harmonics",
+                        max(
+                            0.0,
+                            (float(objective[0]) - targets.max_harmonic_units)
+                            / max(1.0, abs(targets.max_harmonic_units)),
+                        ),
                     )
-                if targets.min_margin_percent is not None:
-                    margin_percent = -float(objective[1])
-                    normalized_violations.append(
-                        (
-                            "margin",
-                            max(
-                                0.0,
-                                (targets.min_margin_percent - margin_percent)
-                                / max(1.0, abs(targets.min_margin_percent)),
-                            ),
-                        )
+                )
+            if targets.min_margin_percent is not None:
+                margin_percent = -float(objective[1])
+                normalized_violations.append(
+                    (
+                        "margin",
+                        max(
+                            0.0,
+                            (targets.min_margin_percent - margin_percent)
+                            / max(1.0, abs(targets.min_margin_percent)),
+                        ),
                     )
+                )
             search_candidate = ParetoCandidate(
                 genome=np.asarray(genome, dtype=float),
                 design=solved.design,
@@ -1418,7 +1325,6 @@ def run_campaign(
 
     return ParetoResult(
         candidates=tuple(candidates),
-        excluded_margin_layers=_margin_exclusions(targets),
         near_feasible=tuple(near_feasible[:10]),
         search_front=tuple(search_front),
     )
@@ -1488,7 +1394,7 @@ def _certify_candidate(
     ):
         return None
     try:
-        solved = operating_point(design, targets.target_bore_field_t)
+        solved = solve_operating_point(design, targets)
         harmonics = harmonic_table(
             solved.design,
             targets.r_ref_mm,
@@ -1510,7 +1416,17 @@ def _certify_candidate(
         operating_current_a = abs(solved.operating_current_a)
         if targets.max_harmonic_units is not None and field_quality > targets.max_harmonic_units:
             return None
-        if targets.max_current_a is not None and operating_current_a > targets.max_current_a:
+        if targets.fixed_current_a is not None:
+            if fixed_current_field_violation(solved, targets) > 0.0:
+                return None
+        elif (
+            current_range_violation(
+                operating_current_a,
+                targets.min_current_a,
+                targets.max_current_a,
+            )
+            > 0.0
+        ):
             return None
         margins = load_line_margin_detail(
             solved.design,
@@ -1633,24 +1549,12 @@ def _search_nondominated(
     return tuple(rank_zero)
 
 
-class AdaptiveOffspringMating(InfillCriterion):
-    """Wrap ``MixedVariableMating`` with a cheap post-hoc validity retry (task 0047).
+class FeasibilityAwareMating(InfillCriterion):
+    """Retry offspring that remain geometrically invalid after repair.
 
-    Narrower than dipole_designer's own offspring-regeneration mechanism,
-    whose main goal is reducing live-ROXIE call cost -- not DOT's
-    bottleneck, since DOT's search never calls live ROXIE per-candidate.
-    What's worth porting is the cheap pre-validity retry loop: after the
-    wrapped mating (which already runs ``CampaignRepair``) produces
-    offspring, check each one against real ``check_feasibility``; for any
-    still infeasible, retry in bounded priority order -- first a fresh
-    mating draw from the same parent pool (giving ``CampaignRepair``
-    another attempt at a different random genome), then fall back to a
-    feasibility-aware individual from the existing constructive sampler
-    (reusing existing code rather than inventing a new retry taxonomy).
-    Tracks the per-generation valid-offspring fraction for diagnostics;
-    true mutation-strength modulation (dipole_designer's adaptive 0.2-1.0
-    scale) is deferred to a follow-up task rather than forcing a fragile
-    hook into pymoo's per-variable-kind operator internals.
+    A bounded fresh mating attempt is followed by a constructive-sampler
+    fallback. The calculation and objective functions are unchanged; this
+    avoids spending expensive physics evaluations on known-invalid geometry.
     """
 
     def __init__(
@@ -1737,64 +1641,46 @@ def _mixed_variable_nsga2(
     topology: Topology,
     feasibility: FeasibilitySettings,
     pop_size: int,
-    targets: OptimizationTargets | None = None,
-    topology_survival: TopologySurvivalConfig | None = None,
-    adaptive_offspring: bool = False,
+    targets: OptimizationTargets,
 ) -> NSGA2:
     # pymoo's default duplicate elimination converts X to a float array, which
     # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
     # has a mixed-genome duplicate comparator.
     duplicate_elimination = NoDuplicateElimination()
-    if targets is None:
-        targets = OptimizationTargets(
-            target_bore_field_t=0.0,
-            r_ref_mm=0.0,
-            max_order=1,
-            cadata_by_layer=(),
-            temperature_k=0.0,
-        )
     repair = CampaignRepair(topology, feasibility, targets)
-    survival = TopologyAwareRankAndCrowding(topology_survival or TopologySurvivalConfig())
+    survival = TopologyAwareRankAndCrowding(
+        recommended_topology_survival_config(topology, pop_size)
+    )
     sampling = ConstructiveMixedVariableSampling(topology, feasibility)
-    # dd's own topology-collapse review (REVIEW_blind_optimizer_topology_collapse.md,
-    # section 5.8/T5) found that pymoo-style SBX crossover blending discrete
-    # genes (then rounding) "is semantically weak and tends to push [them]
-    # toward whichever parent dominates the front" -- accelerating premature
-    # convergence to the incumbent topology. pymoo's MixedVariableMating
-    # already avoids this for Binary (``active``) genes via UX (uniform
-    # gene swap, no interpolation), but its own default for Integer
-    # (``n_turns``) is still ``SBX(vtype=float, repair=RoundingRepair())``,
-    # the exact blend-then-round pattern dd's review flagged. Override it
-    # with the same UX swap used for Binary -- an integer-exact swap, never
-    # a blend -- matching dd's actual fix.
+    # Use exact uniform exchange for discrete genes. Blending integer turn
+    # counts and then rounding biases offspring toward artificial midpoints.
     crossover = {
         Binary: UX(),
         Real: SBX(),
         Integer: UX(),
         Choice: UX(),
     }
-    # With crossover no longer blending Integer (n_turns) genes, mutation is
-    # the ONLY source of new turn values -- and pymoo's default per-gene
-    # mutation rate (``prob_var = min(0.5, 1/n_var)``) is far too low for
-    # DOT's genomes (~1.7% per gene at n_var=60), confirmed empirically:
-    # only 11/30 random seeds produced any novel turn value across 12
-    # offspring under the default rate. dd's own turn mutation rate is an
-    # explicit, deliberately-tuned constant (``turn_mutation_prob=0.20``,
-    # not the generic 1/n_var default) -- matched here for the same reason.
+    # Mutation is the source of new turn values, so keep its measured
+    # per-turn-gene probability explicit instead of using pymoo's small
+    # generic 1/n_var default for long mixed genomes.
     mutation = {
         Binary: BFM(),
         Real: PM(),
         Integer: PM(vtype=float, repair=RoundingRepair(), prob_var=0.2),
         Choice: ChoiceRandomMutation(),
     }
-    mating: InfillCriterion = MixedVariableMating(
+    base_mating = MixedVariableMating(
         crossover=crossover,
         mutation=mutation,
         repair=repair,
         eliminate_duplicates=duplicate_elimination,
     )
-    if adaptive_offspring:
-        mating = AdaptiveOffspringMating(topology, feasibility, mating, sampling)
+    mating: InfillCriterion = FeasibilityAwareMating(
+        topology,
+        feasibility,
+        base_mating,
+        sampling,
+    )
     return NSGA2(
         pop_size=pop_size,
         sampling=sampling,
@@ -1940,19 +1826,52 @@ def _assign_sector_turns(
     phi_variables: list[tuple[str, int, tuple[float, float]]],
     turn_bounds: tuple[int, int],
     target_total: int,
+    *,
+    strategy: str = "balanced",
+    rng: np.random.Generator | None = None,
 ) -> None:
-    """Distribute a generic sector-coil turn total across active blocks."""
+    """Distribute a generic sector-coil turn total across active blocks.
+
+    The physics-seeded part of the initial population deliberately rotates
+    through balanced, midplane-weighted, pole-weighted, and random
+    distributions.  This avoids encoding one preferred block topology while
+    retaining the classical 60-degree sector-coil estimate for the layer's
+    total conductor.  The genetic search remains free to change every turn
+    count afterwards.
+    """
 
     block_indices = sorted(block_index for _name, block_index, _bounds in phi_variables)
     lower, upper = turn_bounds
-    remaining = max(len(block_indices) * lower, target_total)
     assignments = {block_index: lower for block_index in block_indices}
-    remaining -= len(block_indices) * lower
-    # Bias conductor gently toward the midplane, consistent with a cos-theta
-    # current sheet, while respecting the user's per-block limits.
+    capacity = len(block_indices) * max(0, upper - lower)
+    remaining = min(capacity, max(0, target_total - len(block_indices) * lower))
+
+    if strategy == "balanced":
+        allocation_order = block_indices
+    elif strategy == "midplane_weighted":
+        allocation_order = [
+            block_index
+            for rank, block_index in enumerate(block_indices)
+            for _ in range(len(block_indices) - rank)
+        ]
+    elif strategy == "pole_weighted":
+        allocation_order = [
+            block_index
+            for rank, block_index in enumerate(reversed(block_indices))
+            for _ in range(len(block_indices) - rank)
+        ]
+    elif strategy == "random_weighted":
+        local_rng = np.random.default_rng() if rng is None else rng
+        allocation_order = list(local_rng.permutation(block_indices))
+    else:
+        raise ValueError(f"unsupported sector-turn allocation strategy: {strategy!r}")
+
     while remaining > 0:
         progressed = False
-        for block_index in block_indices:
+        if strategy == "random_weighted":
+            local_rng = np.random.default_rng() if rng is None else rng
+            allocation_order = list(local_rng.permutation(block_indices))
+        for block_index in allocation_order:
             if assignments[block_index] >= upper:
                 continue
             assignments[block_index] += 1
@@ -2014,12 +1933,8 @@ def _repair_target_gap_mm(
 ) -> float:
     """Minimum inter-block gap the phi repair/sampler should target.
 
-    ``feasibility.min_gap_mm`` is the midplane-clearance value (dd's C4),
-    which is unrelated to and typically much smaller than the inter-block
-    gap requirement (dd's C7a/C7b, ``min_inter_block_gap_mm``). Repairing
-    only to ``min_gap_mm`` left offspring with real (but unrepaired)
-    ``inter_block_gap`` violations whenever a campaign configured a
-    stricter wedge-gap minimum -- use whichever is larger.
+    Midplane clearance and inter-block clearance are distinct requirements.
+    Use whichever value is larger when ordering blocks.
     """
 
     configured = feasibility.min_inter_block_gap_mm
@@ -2041,14 +1956,3 @@ def _block_is_active(sample: dict[str, float | int], layer_index: int, block_ind
     if block_index == 0:
         return True
     return bool(sample.get(f"layer_{layer_index}_block_{block_index}_active", True))
-
-
-def _margin_exclusions(targets: OptimizationTargets) -> tuple[MarginEvaluationExclusion, ...]:
-    exclusions = {exclusion.layer_index: exclusion for exclusion in targets.excluded_margin_layers}
-    for layer_index, layer_data in enumerate(targets.cadata_by_layer):
-        if layer_data is None and layer_index not in exclusions:
-            exclusions[layer_index] = MarginEvaluationExclusion(
-                layer_index=layer_index,
-                reason="conductor data unavailable; load-line margin not evaluated",
-            )
-    return tuple(exclusions[index] for index in sorted(exclusions))

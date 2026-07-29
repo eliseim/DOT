@@ -1,4 +1,4 @@
-"""Lightweight hover tooltips for Tkinter widgets (task 0057).
+"""Lightweight hover tooltips for Tkinter widgets.
 
 Tkinter has no built-in tooltip widget. This is the standard bind-on-Enter/
 Leave-a-borderless-Toplevel pattern, kept deliberately small: DOT's GUI has
