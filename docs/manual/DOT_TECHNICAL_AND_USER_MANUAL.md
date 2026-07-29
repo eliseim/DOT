@@ -1,9 +1,9 @@
-# DOT 1.0.0 - Dipole Optimization Tool
+# DOT 1.1.0 - Dipole Optimization Tool
 
 ## Technical Reference and User Manual
 
 Manual edition 1.1  
-Software documented: DOT 1.0.0  
+Software documented: DOT 1.1.0
 Date: 29 July 2026  
 Author: Mattia Elisei, INFN Milan and University of Rome La Sapienza  
 License: MIT
@@ -27,7 +27,7 @@ The purpose of this document is to make every important engineering decision mad
 - What is shown live, what is saved, and what has passed final certification?
 - What does a successful result establish, and what remains outside the model?
 
-DOT is a pre-design and target-synthesis engine. It is not a construction drawing or a complete magnet sign-off. Version 1.0.0 models straight two-dimensional conductor blocks in an air-core, infinitely long magnet. It does not model iron, saturation, coil ends, persistent-current magnetization, mechanical stress, conductor motion, training, quench protection, field errors from manufacturing tolerances, or three-dimensional effects. A certified DOT design is certified only against the declared two-dimensional model and constraints.
+DOT is a pre-design and target-synthesis engine. It is not a construction drawing or a complete magnet sign-off. Version 1.1.0 models straight two-dimensional conductor blocks in an air-core, infinitely long magnet. It does not model iron, saturation, coil ends, persistent-current magnetization, mechanical stress, conductor motion, training, quench protection, field errors from manufacturing tolerances, or three-dimensional effects. A certified DOT design is certified only against the declared two-dimensional model and constraints.
 
 The final engineering workflow must therefore include an independent field solution, tolerance analysis, mechanical and protection design, and a three-dimensional end design before a magnet can be considered buildable.
 
@@ -416,7 +416,7 @@ The user supplies one `.cadata` file for every layer and selects the exact, case
 
 This prevents geometry from one cable, copper ratio from another strand, and a fit from an unrelated conductor family from being combined accidentally.
 
-The required cable data include strand count, cable degradation, cable dimensions, strand diameter, copper/non-copper area ratio, insulation, and a supported critical-current fit. Supported fit types in version 1.0.0 are REMFIT type 1 (Bottura Nb-Ti) and type 11 (CERN high-field Nb3Sn). The coefficient sets `FIT1`, `HFM1`, `MQXFS5`, and `PIT192` have been compared with executable reference calculations; names are catalogue identifiers, while support is determined by the REMFIT type and coefficients. Types 2-10 are preserved as typed unsupported catalogue results for diagnostics, but are excluded from the GUI selector and cannot launch a GUI campaign.
+The required cable data include strand count, cable degradation, cable dimensions, strand diameter, copper/non-copper area ratio, insulation, and a supported critical-current fit. Supported fit types in version 1.1.0 are REMFIT type 1 (Bottura Nb-Ti) and type 11 (CERN high-field Nb3Sn). The coefficient sets `FIT1`, `HFM1`, `MQXFS5`, and `PIT192` have been compared with executable reference calculations; names are catalogue identifiers, while support is determined by the REMFIT type and coefficients. Types 2-10 are preserved as typed unsupported catalogue results for diagnostics, but are excluded from the GUI selector and cannot launch a GUI campaign.
 
 ### 8.2 Non-copper area and cable critical current
 
@@ -586,32 +586,47 @@ Feasibility-aware offspring regeneration is part of every campaign. After crosso
 
 This mechanism improves the fraction of usable offspring. It does not change mutation strength and does not bypass constraint evaluation.
 
-### 10.9 One generation in operational order
+### 10.9 Optional radial-block preference
+
+The GUI can enable a secondary preference for winding-friendly radial blocks. For each non-midplane block, DOT locates the central cable polygon, or averages the two central cables when the turn count is even. It compares the cable-center polar angle with the cable-frame `alpha` angle modulo 180 degrees. Zero deviation is exactly radial.
+
+The option is deliberately gated and cannot replace the electromagnetic search:
+
+1. it remains inactive until hard-feasible target-met candidates persist for three consecutive generations;
+2. after activation, only 5 percent of offspring are used as radial trials;
+3. a trial changes only free non-midplane `alpha` genes;
+4. the complete repair chain and exact geometry checks run again;
+5. survival can preserve at most one population-wide radial exemplar, and only from the best available Pareto rank.
+
+The first block of every layer is excluded from the preference because its `alpha` is fixed by the campaign definition. Bore field, harmonic residual, load-line margin, powering limits, and every geometry constraint keep precedence. With the check box off, the 1.0.0 search path is unchanged.
+
+### 10.10 One generation in operational order
 
 The effective order is:
 
 1. select parents from the current population;
 2. apply mixed-variable crossover and mutation;
 3. execute the full repair chain;
-4. regenerate persistently invalid offspring when enabled;
-5. decode each candidate at reference current;
-6. run ground-truth geometry and turn-budget gates;
-7. solve current for the target bore field;
-8. evaluate harmonics and margins with the search calculation;
-9. calculate hard-constraint violations and the two objectives;
-10. combine parents and offspring;
-11. perform constrained non-dominated sorting, crowding, and topology-aware survival;
-12. select one live design using the search-population objectives;
-13. recompute that selected design's harmonics and block margins with the final numerical settings;
-14. update the GUI and generation archive with those recalculated values.
+4. if the radial option is active and a target-met parent exists, radialize a small trial subset and repeat the full repair chain;
+5. regenerate persistently invalid offspring;
+6. decode each candidate at reference current;
+7. run ground-truth geometry and turn-budget gates;
+8. solve current for the target bore field;
+9. evaluate harmonics and margins with the search calculation;
+10. calculate hard-constraint violations and the two objectives;
+11. combine parents and offspring;
+12. perform constrained non-dominated sorting, crowding, and topology-aware survival;
+13. select one live design using the search-population objectives;
+14. recompute that selected design's harmonics and block margins with the final numerical settings;
+15. update the GUI and generation archive with those recalculated values.
 
-### 10.10 The live best is not the final optimum
+### 10.11 The live best is not the final optimum
 
 Among hard-feasible individuals, DOT chooses the live display candidate by first minimizing total violation of the harmonic-margin target box and then a balanced score based on harmonic and margin target ratios. If no individual is hard-feasible, it displays the candidate with the smallest maximum constraint violation.
 
 This rule gives the user a useful evolving representative. It is not an extra optimization objective and does not replace the Pareto archive. The population is not fully recalculated every generation: NSGA-II selects the representative using the search values, then DOT evaluates that one geometry with the same settings used during final verification. Consequently, the plotted margin, harmonic residual, or total turns can move in a direction that looks worse when the representative switches to a different trade-off branch.
 
-### 10.11 Stop behavior and reproducibility
+### 10.12 Stop behavior and reproducibility
 
 The Stop button is cooperative. DOT completes the active generation and then stops; it does not terminate a population evaluation halfway through.
 
@@ -636,7 +651,7 @@ Certified survivors are deduplicated by layer radius and every block's `phi`, `a
 
 Fewer turns and fewer active blocks are not ordinary objectives. They are used only when two electromagnetic objective pairs are equal within numerical-noise tolerances (`rel_tol = 10^-12`, `abs_tol = 10^-9`). Among such equivalent designs, DOT prefers fewer total turns, then fewer active blocks. This prevents complexity preference from erasing a physically different harmonic-margin compromise.
 
-There is no post-NSGA local refinement stage in version 1.0.0.
+There is no post-NSGA local refinement stage in version 1.1.0.
 
 ## 12. Understanding the Pareto frontier
 
@@ -757,6 +772,8 @@ Choose a preset:
 Set a seed for reproducibility. DOT always uses its single Pareto-search policy.
 
 **Parallel candidate evaluation** is off by default. When enabled, the GUI leaves one logical CPU free and uses at most four workers. It can accelerate large populations, but process startup, memory, and serialization overhead may outweigh the benefit for small campaigns or restricted hardware. If worker creation fails, retry with it off.
+
+**Prefer radial blocks after electromagnetic targets are met** is off by default. When enabled, the preference begins only after hard-feasible layouts inside the harmonic-margin target box persist for three generations. It changes only free block angles and keeps all electromagnetic objectives and geometry constraints ahead of radial alignment.
 
 #### Step 7 - Run
 
@@ -915,7 +932,8 @@ The command prints one progress and ETA line per generation. For multiple seeds,
     "population": 160,
     "generations": 100,
     "seeds": [7, 19],
-    "workers": 1
+    "workers": 1,
+    "prefer_radial_design": false
   }
 }
 ```
@@ -1104,7 +1122,7 @@ The correct interpretation is: *this decoded straight-block air-core cross-secti
 
 1. K. Deb, A. Pratap, S. Agarwal, and T. Meyarivan, "A fast and elitist multiobjective genetic algorithm: NSGA-II," *IEEE Transactions on Evolutionary Computation*, 6(2), 182-197, 2002. DOI: 10.1109/4235.996017.
 2. L. Bottura, "A practical fit for the critical surface of NbTi," *IEEE Transactions on Applied Superconductivity*, 10(1), 1054-1057, 2000.
-3. DOT 1.0.0 source modules and tests in the release dated 29 July 2026, especially `geometry`, `physics`, `conductors`, `optimize`, `campaign`, `results`, and `gui`.
+3. DOT 1.1.0 source modules and tests in the release dated 29 July 2026, especially `geometry`, `physics`, `conductors`, `optimize`, `campaign`, `results`, and `gui`.
 
 ## End of manual
 

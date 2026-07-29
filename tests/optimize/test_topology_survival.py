@@ -74,6 +74,82 @@ def test_topology_aware_survival_disabled_by_default_matches_plain_rank_and_crow
     assert "b" not in {ind.get("topology_family") for ind in survivors}
 
 
+def test_radial_preference_preserves_a_target_met_exemplar_on_the_best_front() -> None:
+    pop = Population.new(X=np.arange(5, dtype=float)[:, None])
+    pop.set(
+        "F",
+        np.asarray(
+            [
+                [1.0, 5.0],
+                [2.0, 4.0],
+                [3.0, 3.0],
+                [4.0, 2.0],
+                [5.0, 1.0],
+            ]
+        ),
+    )
+    pop.set("topology_family", np.asarray(["a"] * 5, dtype=object))
+    pop.set("radiality", np.asarray([30.0, 20.0, 0.5, 10.0, 25.0]))
+    pop.set("radial_preference_eligible", np.asarray([True] * 5))
+
+    survivors = TopologyAwareRankAndCrowding(
+        TopologySurvivalConfig(),
+        prefer_radial_design=True,
+        radial_activation_delay_generations=0,
+    )._do(None, pop, n_survive=2, random_state=np.random.RandomState(0))
+
+    assert 2.0 in {float(individual.X[0]) for individual in survivors}
+
+
+def test_radial_preference_never_promotes_a_dominated_candidate() -> None:
+    pop = Population.new(X=np.arange(4, dtype=float)[:, None])
+    pop.set(
+        "F",
+        np.asarray(
+            [
+                [1.0, 4.0],
+                [2.0, 3.0],
+                [3.0, 2.0],
+                [5.0, 5.0],
+            ]
+        ),
+    )
+    pop.set("topology_family", np.asarray(["a"] * 4, dtype=object))
+    pop.set("radiality", np.asarray([20.0, 10.0, 5.0, 0.0]))
+    pop.set("radial_preference_eligible", np.asarray([True] * 4))
+
+    survivors = TopologyAwareRankAndCrowding(
+        TopologySurvivalConfig(),
+        prefer_radial_design=True,
+        radial_activation_delay_generations=0,
+    )._do(None, pop, n_survive=2, random_state=np.random.RandomState(0))
+
+    assert 3.0 not in {float(individual.X[0]) for individual in survivors}
+
+
+def test_radial_preference_adds_one_exemplar_without_replacing_family_seeds() -> None:
+    survival = TopologyAwareRankAndCrowding(
+        TopologySurvivalConfig(
+            enabled=True,
+            min_families=2,
+            max_survivors_per_family=3,
+        ),
+        prefer_radial_design=True,
+        radial_activation_delay_generations=0,
+    )
+
+    survivors = survival._quota_fill(
+        [0, 2, 1, 3],
+        np.asarray(["a", "a", "b", "b"], dtype=object),
+        3,
+        radialities=np.asarray([20.0, 1.0, 30.0, 5.0]),
+        radial_eligible=np.asarray([True, True, True, True]),
+        ranks=np.asarray([0, 0, 0, 0]),
+    )
+
+    assert survivors == [0, 2, 1]
+
+
 def test_topology_aware_survival_preserves_families_when_every_candidate_is_infeasible() -> None:
     families = np.array(["a", "a", "a", "b", "c", "d"], dtype=object)
     pop = Population.new(X=np.arange(6, dtype=float)[:, None])

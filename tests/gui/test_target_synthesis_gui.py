@@ -122,6 +122,7 @@ def test_state_uses_physical_layer_gaps_and_current_defaults() -> None:
     app.layer_vars[1]["radial_gap_mm"].set("0.5")
     app.layer_vars[1]["azimuthal_gap_mm"].set("0.2")
     app.parallel_evaluations_var.set(True)
+    app.prefer_radial_design_var.set(True)
 
     state = target_synthesis_gui.App._state(app)
 
@@ -137,6 +138,7 @@ def test_state_uses_physical_layer_gaps_and_current_defaults() -> None:
     assert state["layers"][0]["alpha_min_deg"] == pytest.approx(-15.0)
     assert state["layers"][0]["alpha_max_deg"] == pytest.approx(75.0)
     assert state["nsga2"]["parallel_evaluations"] is True
+    assert state["nsga2"]["prefer_radial_design"] is True
 
 
 def test_gui_state_uses_equal_current_bounds_to_request_fixed_current() -> None:
@@ -525,7 +527,7 @@ def test_gui_run_manifest_snapshots_conductor_files_and_runtime(tmp_path) -> Non
     snapshot = run_dir / manifest["inputs"][0]["snapshot"]
     assert snapshot.read_text(encoding="utf-8") == "CONDUCTOR TEST\n"
     assert len(manifest["inputs"][0]["sha256"]) == 64
-    assert manifest["dot_version"] == "1.0.0"
+    assert manifest["dot_version"] == "1.1.0"
     assert manifest["packages"]["numpy"]
     assert manifest["search_fidelity"]["bore_quadrature"] == "gauss-legendre"
     assert manifest["certification_fidelity"]["bore_quadrature"] == "midpoint"
@@ -874,6 +876,7 @@ def _app_shell():
     app.n_gen_var = FakeVar(str(target_synthesis_gui.DEFAULT_STATE["nsga2"]["n_gen"]))
     app.seed_var = FakeVar("7")
     app.parallel_evaluations_var = FakeVar(False)
+    app.prefer_radial_design_var = FakeVar(False)
     app.feasibility_settings = dict(target_synthesis_gui.DEFAULT_STATE["feasibility"])
     app.layer_vars = [_layer_vars(0)]
     return app

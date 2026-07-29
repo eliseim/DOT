@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 - 2026-07-29
+
+- Added an optional radial-block preference for winding-friendly layouts.
+- The preference remains inactive until a hard-feasible candidate meets the declared
+  harmonic and load-line-margin targets.
+- Once active, it steers only a small fraction of offspring by changing the free block
+  `alpha` angles, then reapplies every existing geometry repair and feasibility check.
+- Preserved at most one radial exemplar from the best available Pareto rank, so radial
+  appearance cannot replace a better electromagnetic front.
+- Added central-cable radial-alignment measurements to candidate JSON files, summary
+  images, shortlist manifests, and the final GUI result.
+- Preserved the complete audited 1.0.0 release as local tag `v1.0.0`.
+
 ## 1.0.0 - 2026-07-29
 
 - Promoted the independently audited codebase to the first stable release.

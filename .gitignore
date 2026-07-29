@@ -33,7 +33,7 @@ tmp/
 
 # licensed/reference documents used during local physics review
 *.pdf
-!DOT_CONCISE_GUIDE.pdf
+!DOT_guide.pdf
 magnet_design_course_gupta/
 best_candidate_problems.png
 

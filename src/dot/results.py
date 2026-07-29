@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 from matplotlib.figure import Figure
 
-from dot.geometry import DipoleDesign
+from dot.geometry import DipoleDesign, radiality_summary
 from dot.geometry.constraints import (
     first_layer_pole_turn_clearance_mm,
     inter_block_clearances,
@@ -222,6 +222,11 @@ def candidate_document(
         else -candidate.objectives[1]
     )
     target_by_order = dict(candidate.harmonic_targets)
+    radial_alignment = radiality_summary(candidate.design)
+    adjustable_radial_alignment = radiality_summary(
+        candidate.design,
+        include_midplane_blocks=False,
+    )
     return {
         "schema_version": 3,
         "campaign": campaign_name,
@@ -245,6 +250,33 @@ def candidate_document(
         "topology_family": _topology_family(candidate.design),
         "total_turns": _total_turns(candidate.design),
         "total_blocks": _total_blocks(candidate.design),
+        "radial_alignment": {
+            "definition": (
+                "absolute difference between the central cable polar angle and "
+                "its cable-frame angle, modulo 180 degrees"
+            ),
+            "adjustable_blocks_rms_deviation_deg": (
+                adjustable_radial_alignment.rms_deviation_deg
+            ),
+            "adjustable_blocks_max_deviation_deg": (
+                adjustable_radial_alignment.max_deviation_deg
+            ),
+            "all_blocks_rms_deviation_deg": radial_alignment.rms_deviation_deg,
+            "blocks": [
+                {
+                    "layer": row.layer_index + 1,
+                    "block_in_layer": row.block_index + 1,
+                    "center_turns": [
+                        turn_index + 1 for turn_index in row.center_turn_indices
+                    ],
+                    "center_phi_deg": row.center_phi_deg,
+                    "center_alpha_deg": row.center_alpha_deg,
+                    "deviation_deg": row.deviation_deg,
+                    "angle_is_fixed": row.block_index == 0,
+                }
+                for row in radial_alignment.blocks
+            ],
+        },
         "first_layer_pole_turn_clearance_mm": first_layer_pole_turn_clearance_mm(candidate.design),
         "harmonics": [
             {
@@ -526,6 +558,10 @@ def _export_design_shortlist(
                     f"b{order}": target for order, target in candidate.harmonic_targets
                 },
                 "minimum_margin_percent": -candidate.objectives[1],
+                "adjustable_blocks_radial_rms_deviation_deg": radiality_summary(
+                    candidate.design,
+                    include_midplane_blocks=False,
+                ).rms_deviation_deg,
                 "operating_current_a": (
                     candidate.operating_current_a
                     if candidate.operating_current_a is not None
@@ -654,6 +690,11 @@ def _electromagnetic_summary_rows(document: dict[str, Any]) -> list[tuple[str, s
             f"{document['worst_harmonic_residual_units']:.6g} units",
         ),
         ("Total turns / blocks", f"{document['total_turns']} / {document['total_blocks']}"),
+        (
+            "Free-block radial alignment (RMS / max)",
+            f"{document['radial_alignment']['adjustable_blocks_rms_deviation_deg']:.5g} / "
+            f"{document['radial_alignment']['adjustable_blocks_max_deviation_deg']:.5g} deg",
+        ),
     ]
     rows.extend(
         (

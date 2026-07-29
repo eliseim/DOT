@@ -28,7 +28,12 @@ from dot import __version__
 from dot.acceleration import jit_status, recommended_process_workers
 from dot.conductors import conservative_maximum_current_advice, parse_cadata_text
 from dot.conductors.cadata import ConductorResolution, resolve_conductor
-from dot.geometry import CableSpec, TurnPolygon, midplane_anchors_from_gaps
+from dot.geometry import (
+    CableSpec,
+    TurnPolygon,
+    midplane_anchors_from_gaps,
+    radiality_summary,
+)
 from dot.geometry.constraints import first_layer_pole_turn_clearance_mm
 from dot.optimize import LayerConductorData, LayerTopology, Topology
 from dot.optimize.problem import FeasibilitySettings, OptimizationTargets
@@ -238,6 +243,13 @@ PARAMETER_HELP: dict[str, str] = {
         "one logical CPU free and uses at most four workers. It is off by default for maximum "
         "hardware compatibility; enable it for larger populations after comparing one short run."
     ),
+    "prefer_radial_design": (
+        "After target-met designs persist for three generations, use a small part of each later "
+        "generation to make the free-angle blocks more radial. Radial means "
+        "the central cable's polar angle is close to its cable-frame angle. Electromagnetic "
+        "objectives and every geometry constraint keep precedence; fixed midplane blocks are "
+        "not altered."
+    ),
 }
 
 
@@ -292,6 +304,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "n_gen": NSGA2_PRESETS[DEFAULT_NSGA2_PRESET][1],
         "seed": 7,
         "parallel_evaluations": False,
+        "prefer_radial_design": False,
     },
     "feasibility": {
         "min_gap_mm": 0.0,
@@ -388,6 +401,7 @@ class App(tk.Tk):
         self.n_gen_var = tk.StringVar()
         self.seed_var = tk.StringVar()
         self.parallel_evaluations_var = tk.BooleanVar(value=False)
+        self.prefer_radial_design_var = tk.BooleanVar(value=False)
         self.acceleration_status_var = tk.StringVar(value=jit_status())
         self.progress_var = tk.StringVar(value="Idle")
         self.result_var = tk.StringVar(value="No campaign has been run.")
@@ -810,6 +824,13 @@ class App(tk.Tk):
         )
         parallel.grid(row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
         attach_tooltip(parallel, PARAMETER_HELP["parallel_evaluations"])
+        radial = ttk.Checkbutton(
+            frame,
+            text="Prefer radial blocks after electromagnetic targets are met",
+            variable=self.prefer_radial_design_var,
+        )
+        radial.grid(row=5, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        attach_tooltip(radial, PARAMETER_HELP["prefer_radial_design"])
 
     def _on_search_preset(self, _event: tk.Event | None = None) -> None:
         self._apply_search_preset()
@@ -1475,6 +1496,10 @@ class App(tk.Tk):
             default=None,
         )
         pole_turn_clearance = first_layer_pole_turn_clearance_mm(candidate.design)
+        radial_alignment = radiality_summary(
+            candidate.design,
+            include_midplane_blocks=False,
+        )
         meets_targets = (
             harmonic_units <= max_harmonic_units
             and margin_percent >= min_margin_percent
@@ -1498,6 +1523,9 @@ class App(tk.Tk):
                         if pole_turn_clearance is None
                         else f"{pole_turn_clearance:.6g} mm"
                     ),
+                    "Free-block radial alignment (RMS / max): "
+                    f"{radial_alignment.rms_deviation_deg:.6g} / "
+                    f"{radial_alignment.max_deviation_deg:.6g} deg",
                     f"Acceptance: {'meets targets' if meets_targets else 'does not meet targets'}",
                 )
             )
@@ -1983,6 +2011,9 @@ class App(tk.Tk):
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
             min_current_a=state["acceptance"].get("min_current_a"),
             max_current_a=state["acceptance"].get("max_current_a"),
+            prefer_radial_design=bool(
+                state["nsga2"].get("prefer_radial_design", False)
+            ),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=0.0,
@@ -2007,6 +2038,7 @@ class App(tk.Tk):
     def _state(self) -> dict[str, Any]:
         n_layers = self._clamped_layer_count()
         parallel_var = self.__dict__.get("parallel_evaluations_var")
+        prefer_radial_var = self.__dict__.get("prefer_radial_design_var")
         harmonic_target_vars = self.__dict__.get("harmonic_target_vars", {})
         max_harmonic_order = int(self.max_harmonic_order_var.get())
         return {
@@ -2037,6 +2069,9 @@ class App(tk.Tk):
                 "n_gen": int(self.n_gen_var.get()),
                 "seed": int(self.seed_var.get()) if self.seed_var.get().strip() else None,
                 "parallel_evaluations": bool(parallel_var.get()) if parallel_var else False,
+                "prefer_radial_design": (
+                    bool(prefer_radial_var.get()) if prefer_radial_var else False
+                ),
             },
             "feasibility": {
                 **self.feasibility_settings,
@@ -2157,6 +2192,9 @@ class App(tk.Tk):
         parallel_var = self.__dict__.get("parallel_evaluations_var")
         if parallel_var is not None:
             parallel_var.set(bool(nsga2.get("parallel_evaluations", False)))
+        prefer_radial_var = self.__dict__.get("prefer_radial_design_var")
+        if prefer_radial_var is not None:
+            prefer_radial_var.set(bool(nsga2.get("prefer_radial_design", False)))
         self.layer_vars = []
         for index, layer in enumerate(state["layers"]):
             merged_layer = {**DEFAULT_STATE["layers"][0], **layer}

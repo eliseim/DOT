@@ -251,7 +251,7 @@ def _page_chrome(canvas: Canvas, doc: BaseDocTemplate) -> None:
         canvas.setFont(FONT, 7.2)
         canvas.setFillColor(MUTED)
         canvas.drawString(LEFT, PAGE_H - 8.7 * mm, "DOT - Technical Reference and User Manual")
-        canvas.drawRightString(PAGE_W - RIGHT, PAGE_H - 8.7 * mm, "Software 1.0.0")
+        canvas.drawRightString(PAGE_W - RIGHT, PAGE_H - 8.7 * mm, "Software 1.1.0")
         canvas.line(LEFT, 11 * mm, PAGE_W - RIGHT, 11 * mm)
         canvas.drawString(LEFT, 7.2 * mm, "Mattia Elisei - MIT License")
         canvas.drawRightString(PAGE_W - RIGHT, 7.2 * mm, f"Page {doc.page}")
@@ -568,8 +568,8 @@ def _cover() -> list[Flowable]:
         Spacer(1, 15 * mm),
         Table(
             [
-                ["Software", "DOT 1.0.0"],
-                ["Source state", "DOT 1.0.0 source"],
+                ["Software", "DOT 1.1.0"],
+                ["Source state", "DOT 1.1.0 source"],
                 ["Manual", "Edition 1.1 - 29 July 2026"],
                 ["Author", "Mattia Elisei"],
                 ["Affiliations", "INFN Milan and University of Rome La Sapienza"],
@@ -610,8 +610,8 @@ def _front_matter(source_text: str) -> list[Flowable]:
         _markdown_table(
             [
                 ["Control item", "Recorded value"],
-                ["Software release", "DOT 1.0.0"],
-                ["Source state", "DOT 1.0.0 source, 29 July 2026"],
+                ["Software release", "DOT 1.1.0"],
+                ["Source state", "DOT 1.1.0 source, 29 July 2026"],
                 ["Manual version", "1.1"],
                 ["Independent review", status],
                 ["Model boundary", "2D, infinitely long, coil-only, no iron"],

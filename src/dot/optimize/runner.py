@@ -23,7 +23,7 @@ from pymoo.operators.mutation.rm import ChoiceRandomMutation
 from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 
-from dot.geometry import DipoleDesign
+from dot.geometry import DipoleDesign, radialized_block_alpha_deg
 from dot.geometry.constraints import (
     check_extended_lower_edge_nesting,
     check_feasibility,
@@ -1563,15 +1563,30 @@ class FeasibilityAwareMating(InfillCriterion):
         feasibility: FeasibilitySettings,
         mating: MixedVariableMating,
         sampling: Sampling,
+        *,
+        repair: CampaignRepair | None = None,
+        prefer_radial_design: bool = False,
+        radial_trial_fraction: float = 0.05,
+        radial_activation_delay_generations: int = 3,
         max_regeneration_attempts: int = 3,
     ) -> None:
         super().__init__()
+        if not 0.0 <= radial_trial_fraction <= 1.0:
+            raise ValueError("radial_trial_fraction must be in [0, 1]")
+        if radial_activation_delay_generations < 0:
+            raise ValueError("radial_activation_delay_generations must be non-negative")
         self.topology = topology
         self.feasibility = feasibility
         self.mating = mating
         self.sampling = sampling
+        self.repair = repair
+        self.prefer_radial_design = prefer_radial_design
+        self.radial_trial_fraction = radial_trial_fraction
+        self.radial_activation_delay_generations = radial_activation_delay_generations
+        self._radial_target_streak = 0
         self.max_regeneration_attempts = max_regeneration_attempts
         self.valid_fraction_history: list[float] = []
+        self.radial_trial_count_history: list[int] = []
 
     def do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
         off = self.mating.do(problem, pop, n_offsprings, random_state=random_state, **kwargs)
@@ -1579,6 +1594,13 @@ class FeasibilityAwareMating(InfillCriterion):
         if total == 0:
             return off
 
+        radial_trial_count = self._apply_radial_trials(
+            problem,
+            pop,
+            off,
+            random_state,
+        )
+        self.radial_trial_count_history.append(radial_trial_count)
         valid_flags = [self._is_valid(individual.get("X")) for individual in off]
         for index, is_valid in enumerate(valid_flags):
             if is_valid:
@@ -1595,6 +1617,97 @@ class FeasibilityAwareMating(InfillCriterion):
 
         self.valid_fraction_history.append(sum(valid_flags) / total)
         return off
+
+    def _apply_radial_trials(
+        self,
+        problem,
+        pop,
+        offspring,
+        random_state,
+    ) -> int:  # noqa: ANN001
+        """Radialize a small offspring subset only after a target-met parent exists."""
+
+        if not self.prefer_radial_design or self.radial_trial_fraction <= 0.0:
+            return 0
+        eligible = pop.get("radial_preference_eligible")
+        if eligible is None or not np.any(np.asarray(eligible, dtype=bool)):
+            self._radial_target_streak = 0
+            return 0
+        self._radial_target_streak += 1
+        required = max(1, self.radial_activation_delay_generations)
+        if self._radial_target_streak < required:
+            return 0
+        total = len(offspring)
+        trial_count = min(
+            total,
+            max(1, int(math.ceil(self.radial_trial_fraction * total))),
+        )
+        # Do not consume pymoo's variation RNG here. With the option enabled,
+        # the normal offspring stream should remain as close as possible to
+        # the same-seed baseline; only the selected trial genomes differ.
+        stride = max(1, total // trial_count)
+        offset = (self._radial_target_streak - required) % total
+        indices = np.asarray(
+            [(offset + trial_index * stride) % total for trial_index in range(trial_count)],
+            dtype=int,
+        )
+        trials: list[dict[str, object]] = []
+        trial_indices: list[int] = []
+        for index in indices:
+            sample = offspring[int(index)].get("X")
+            if not isinstance(sample, dict):
+                continue
+            trials.append(self._radialize_sample(sample))
+            trial_indices.append(int(index))
+        if not trials:
+            return 0
+
+        repaired: np.ndarray | list[dict[str, object]]
+        if self.repair is None:
+            repaired = trials
+        else:
+            repaired = self.repair._do(
+                problem,
+                np.asarray(trials, dtype=object),
+            )
+        for index, sample in zip(trial_indices, repaired, strict=True):
+            offspring[index].set("X", sample)
+        return len(trial_indices)
+
+    def _radialize_sample(
+        self,
+        sample: dict[str, object],
+    ) -> dict[str, object]:
+        radialized = dict(sample)
+        design = decode(
+            flatten_mixed_genome(radialized, self.topology),
+            self.topology,
+            self.topology.cables,
+        )
+        for layer_index, (layer, layer_topology) in enumerate(
+            zip(design.layers, self.topology.layers, strict=True)
+        ):
+            active_slots = [
+                block_index
+                for block_index in range(layer_topology.n_blocks)
+                if _block_is_active(radialized, layer_index, block_index)
+            ]
+            for genome_block_index, block in zip(
+                active_slots,
+                layer.blocks,
+                strict=True,
+            ):
+                # The midplane frame is a designer-fixed constant and has no
+                # alpha gene. Only free block angles participate.
+                if genome_block_index == 0:
+                    continue
+                radialized[
+                    f"layer_{layer_index}_block_{genome_block_index}_alpha_deg"
+                ] = radialized_block_alpha_deg(
+                    block,
+                    layer_topology.alpha_bounds_deg,
+                )
+        return radialized
 
     def _do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
         # Required by InfillCriterion's abstract interface, but this class
@@ -1649,7 +1762,8 @@ def _mixed_variable_nsga2(
     duplicate_elimination = NoDuplicateElimination()
     repair = CampaignRepair(topology, feasibility, targets)
     survival = TopologyAwareRankAndCrowding(
-        recommended_topology_survival_config(topology, pop_size)
+        recommended_topology_survival_config(topology, pop_size),
+        prefer_radial_design=targets.prefer_radial_design,
     )
     sampling = ConstructiveMixedVariableSampling(topology, feasibility)
     # Use exact uniform exchange for discrete genes. Blending integer turn
@@ -1680,6 +1794,8 @@ def _mixed_variable_nsga2(
         feasibility,
         base_mating,
         sampling,
+        repair=repair,
+        prefer_radial_design=targets.prefer_radial_design,
     )
     return NSGA2(
         pop_size=pop_size,

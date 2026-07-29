@@ -12,7 +12,7 @@ from numbers import Real
 import numpy as np
 from pymoo.core.problem import Problem
 
-from dot.geometry import CableSpec, DipoleDesign
+from dot.geometry import CableSpec, DipoleDesign, radiality_summary
 from dot.geometry.constraints import check_feasibility
 
 from . import objectives as _objectives_module
@@ -32,7 +32,7 @@ _PENALTY = 1.0e12
 FIXED_CURRENT_FIELD_RELATIVE_TOLERANCE = 1.0e-4
 FIXED_CURRENT_FIELD_ABSOLUTE_TOLERANCE_T = 1.0e-7
 _EVALUATION_CACHE_MAXSIZE = 32768
-_RowEvaluation = tuple[tuple[float, float], tuple[float, ...], str]
+_RowEvaluation = tuple[tuple[float, float], tuple[float, ...], str, float]
 _EvaluationCacheKey = bytes
 
 
@@ -55,6 +55,7 @@ class OptimizationTargets:
     max_current_a: float | None = None
     max_total_turns: int | None = None
     max_turns_per_layer: int | None = None
+    prefer_radial_design: bool = False
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.target_bore_field_t) or self.target_bore_field_t <= 0.0:
@@ -131,6 +132,9 @@ class OptimizationTargets:
                 isinstance(value, bool) or not isinstance(value, int) or value < 1
             ):
                 raise ValueError(f"{field_name} must be a positive integer")
+        if not isinstance(self.prefer_radial_design, bool):
+            raise ValueError("prefer_radial_design must be a boolean")
+
     @property
     def fixed_current_a(self) -> float | None:
         """Return the exact requested current when both bounds are equal."""
@@ -427,6 +431,7 @@ class DipoleOptimizationProblem(Problem):
         constraints = np.zeros((rows.shape[0], self.n_ieq_constr), dtype=float)
         # Topology families let survival retain geometrically distinct layouts.
         families = np.full(rows.shape[0], "invalid", dtype=object)
+        radialities = np.full(rows.shape[0], math.inf, dtype=float)
 
         row_keys = [self._evaluation_cache_key(row) for row in rows]
         resolved: dict[_EvaluationCacheKey, _RowEvaluation] = {}
@@ -465,6 +470,7 @@ class DipoleOptimizationProblem(Problem):
                 result[0],
                 tuple(float(value) for value in result[1]),
                 result[2],
+                float(result[3]),
             )
             resolved[key] = immutable
             self._evaluation_cache[key] = immutable
@@ -474,14 +480,21 @@ class DipoleOptimizationProblem(Problem):
 
         results = [resolved[key] for key in row_keys]
 
-        for row_index, (objective_row, constraint_row, family) in enumerate(results):
+        for row_index, (objective_row, constraint_row, family, radiality) in enumerate(results):
             objectives[row_index] = objective_row
             constraints[row_index] = constraint_row
             families[row_index] = family
+            radialities[row_index] = radiality
 
         out["F"] = objectives
         out["G"] = constraints
         out["topology_family"] = families
+        out["radiality"] = radialities
+        out["radial_preference_eligible"] = _radial_preference_eligibility(
+            objectives,
+            constraints,
+            self.targets,
+        )
 
     @staticmethod
     def _evaluation_cache_key(row: np.ndarray) -> _EvaluationCacheKey:
@@ -496,15 +509,21 @@ def _evaluate_row(
     feasibility: FeasibilitySettings,
     targets: OptimizationTargets,
     n_ieq_constr: int,
-) -> tuple[tuple[float, float], np.ndarray, str]:
+) -> tuple[tuple[float, float], np.ndarray, str, float]:
     """Evaluate one genome row in-process or in a worker process."""
 
     objective = (_PENALTY, _PENALTY)
     constraint = np.zeros(n_ieq_constr, dtype=float)
     family = "invalid"
+    radiality = math.inf
     try:
         unit_design = decode(row, topology, cable_map)
         family = topology_family(unit_design)
+        if targets.prefer_radial_design:
+            radiality = radiality_summary(
+                unit_design,
+                include_midplane_blocks=False,
+            ).rms_deviation_deg
         result = check_feasibility(
             unit_design,
             aperture_radius_mm=topology.aperture_radius_mm,
@@ -527,7 +546,7 @@ def _evaluate_row(
                 )
                 for violation in result.violations
             )
-            return objective, constraint, family
+            return objective, constraint, family, radiality
 
         target_constraint_index = 1
         turn_budget_violation = False
@@ -552,7 +571,7 @@ def _evaluate_row(
             turn_budget_violation |= constraint[target_constraint_index] > 0.0
             target_constraint_index += 1
         if turn_budget_violation:
-            return objective, constraint, family
+            return objective, constraint, family, radiality
 
         solved = solve_operating_point(unit_design, targets)
         field_quality = field_quality_objective(
@@ -587,14 +606,36 @@ def _evaluate_row(
             fidelity=targets.search_fidelity,
         )
         objective = (field_quality, -margin_percent)
-        return objective, constraint, family
+        return objective, constraint, family, radiality
     except (KeyError, ValueError, ZeroDivisionError):
         # An evaluation failure is not evidence that any secondary hard
         # constraint passed.  Mark the whole row invalid so it cannot outrank
         # a physically evaluated near-feasible design merely because its
         # unevaluated constraint slots were left at zero.
         constraint[:] = 1.0
-        return (_PENALTY, _PENALTY), constraint, family
+        return (_PENALTY, _PENALTY), constraint, family, radiality
+
+
+def _radial_preference_eligibility(
+    objectives: np.ndarray,
+    constraints: np.ndarray,
+    targets: OptimizationTargets,
+) -> np.ndarray:
+    """Identify hard-feasible candidates already inside the target box."""
+
+    eligible = np.all(constraints <= 0.0, axis=1)
+    eligible &= np.all(np.isfinite(objectives), axis=1)
+    eligible &= np.all(np.abs(objectives) < _PENALTY, axis=1)
+    has_acceptance_target = False
+    if targets.max_harmonic_units is not None:
+        eligible &= objectives[:, 0] <= targets.max_harmonic_units
+        has_acceptance_target = True
+    if targets.min_margin_percent is not None:
+        eligible &= -objectives[:, 1] >= targets.min_margin_percent
+        has_acceptance_target = True
+    if not has_acceptance_target:
+        eligible[:] = False
+    return eligible
 
 
 def _normalized_geometry_violation(
@@ -698,7 +739,9 @@ def _init_worker(
     _objectives_module.PEAK_FIELD_FILAMENTS_PER_AXIS = peak_field_filaments_per_axis
 
 
-def _evaluate_row_worker(row: np.ndarray) -> tuple[tuple[float, float], np.ndarray, str]:
+def _evaluate_row_worker(
+    row: np.ndarray,
+) -> tuple[tuple[float, float], np.ndarray, str, float]:
     return _evaluate_row(
         row,
         _worker_topology,

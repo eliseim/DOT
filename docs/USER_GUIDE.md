@@ -1,4 +1,4 @@
-# DOT 1.0.0 concise user guide
+# DOT 1.1.0 concise user guide
 
 ## 1. Scope
 
@@ -34,6 +34,7 @@ Enter a campaign name and output directory, then set:
 - minimum inter-block clearance, Layer-1 pole-turn distance, numerical tolerance, and nesting;
 - maximum harmonic residual, minimum margin, and optional current bounds;
 - search-effort preset and random seed.
+- optional radial-block preference after the electromagnetic targets are reached.
 
 The conductor name must exactly match a `CONDUCTOR` record in its `.cadata` file. The GUI lists
 only complete conductors using supported critical-current fits: REMFIT type 1 (Nb-Ti) and type 11
@@ -85,6 +86,10 @@ cable-frame angle. Active blocks form a contiguous sequence from midplane to pol
 6. **Select survivors.** Feasible candidates are sorted into non-dominated fronts. Crowding
    distance preserves a spread along the harmonic-margin trade-off. A small family quota prevents
    one active-block topology from eliminating all alternatives too early.
+7. **Apply the optional radial preference.** Only after target-met candidates persist for three
+   consecutive generations, DOT uses 5% of later offspring as radial trials. It changes only
+   the free `alpha` angles, reapplies the complete geometry repair, and retains at most one
+   radial exemplar from the best available Pareto rank. Fixed midplane blocks are unchanged.
 
 Geometry, current, and optional turn budgets are hard constraints during every generation.
 Harmonic and margin targets remain objectives during the search, so promising trade-offs are not
@@ -138,6 +143,11 @@ During the run, the GUI shows:
 Parallel candidate evaluation is optional and off by default for compatibility. It uses separate
 processes and does not change the calculations. Enable it for medium or large campaigns after a
 short hardware check.
+
+The radial-block option is also off by default. Enable it when winding-friendly radial blocks are
+desirable and the campaign is expected to reach its electromagnetic targets before the final
+generation. Candidate JSON files and summary images report the RMS and maximum central-cable
+alignment deviation for the free-angle blocks.
 
 ## 6. Read the results
 

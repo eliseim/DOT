@@ -1,6 +1,6 @@
 # DOT - Dipole Optimization Tool
 
-Current release: **DOT 1.0.0**.
+Current release: **DOT 1.1.0**.
 
 DOT synthesizes two-dimensional, coil-only superconducting dipole cross-sections. It combines
 cable geometry, Biot-Savart fields, multipoles, critical-current/load-line calculations,
@@ -33,7 +33,7 @@ constraints, progress display, certification, and output files. The detailed
 [technical manual](docs/manual/DOT_TECHNICAL_AND_USER_MANUAL.md) documents the physics and
 geometry conventions.
 
-The printable [DOT concise guide](DOT_CONCISE_GUIDE.pdf) combines the workflow, operating
+The printable [DOT guide](DOT_guide.pdf) combines the workflow, operating
 instructions, and 1,000-case physics comparison in one document.
 
 ## What the optimizer does
@@ -46,6 +46,11 @@ Every generation follows the same loop:
 4. compute the current needed for the requested bore field, harmonics, and load-line margins;
 5. rank candidates by two objectives: lower worst harmonic residual and higher minimum margin;
 6. preserve non-dominated candidates, objective-space diversity, and distinct block topologies.
+
+When the optional radial-block preference is enabled, it remains inactive until target-met
+candidates persist for three generations. It then uses a small part of later generations to align
+each free-angle block's central cable with its local radial direction. This never relaxes a
+geometry constraint and never promotes a candidate from a worse Pareto rank.
 
 After the final generation, DOT independently recalculates the non-dominated search archive
 with fixed final numerical settings. A candidate is certified only if it then meets every requested

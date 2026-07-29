@@ -7,7 +7,7 @@ import pytest
 from pymoo.core.population import Population
 
 from dot.conductors import CableRecord, StrandRecord, Type1FitCoefficients
-from dot.geometry import Block, CableSpec, DipoleDesign, Layer
+from dot.geometry import Block, CableSpec, DipoleDesign, Layer, block_radiality
 from dot.geometry.constraints import check_feasibility, check_layer_nesting
 from dot.optimize import (
     LayerConductorData,
@@ -885,6 +885,53 @@ def test_feasibility_aware_mating_degrades_gracefully_when_fallback_also_fails(
 
     assert len(off) == 1
     assert adaptive.valid_fraction_history == [0.0]
+
+
+def test_radial_mating_trials_start_only_after_a_target_met_parent_exists() -> None:
+    topology = _topology()
+    feasibility = _feasibility()
+    sample = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 10.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 30.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": -10.0,
+    }
+    before = decode(
+        flatten_mixed_genome(sample, topology),
+        topology,
+        topology.cables,
+    )
+    adaptive = FeasibilityAwareMating(
+        topology,
+        feasibility,
+        _StubMating([sample]),
+        ConstructiveMixedVariableSampling(topology, feasibility),
+        prefer_radial_design=True,
+        radial_trial_fraction=1.0,
+        radial_activation_delay_generations=0,
+    )
+
+    not_ready = Population.new(X=[dict(sample)])
+    not_ready.set("radial_preference_eligible", np.asarray([False]))
+    unchanged = adaptive.do(None, not_ready, 1, random_state=np.random.RandomState(2))
+    assert unchanged[0].X["layer_0_block_1_alpha_deg"] == -10.0
+
+    ready = Population.new(X=[dict(sample)])
+    ready.set("radial_preference_eligible", np.asarray([True]))
+    radialized = adaptive.do(None, ready, 1, random_state=np.random.RandomState(2))
+    after = decode(
+        flatten_mixed_genome(radialized[0].X, topology),
+        topology,
+        topology.cables,
+    )
+
+    assert adaptive.radial_trial_count_history == [0, 1]
+    assert block_radiality(after.layers[0].blocks[1]).deviation_deg < block_radiality(
+        before.layers[0].blocks[1]
+    ).deviation_deg
 
 
 def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:

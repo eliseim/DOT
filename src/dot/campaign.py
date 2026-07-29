@@ -58,6 +58,7 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
     magnet = _mapping(raw, "magnet")
     acceptance = _mapping(raw, "acceptance")
     geometry = _mapping(raw, "geometry")
+    optimization = _mapping(raw, "optimization")
     layer_rows = raw.get("layers")
     if not isinstance(layer_rows, list) or not layer_rows:
         raise ValueError("layers must be a non-empty list")
@@ -242,6 +243,10 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
         ),
         search_fidelity=search_fidelity,
         certification_fidelity=certification_fidelity,
+        prefer_radial_design=_boolean(
+            optimization.get("prefer_radial_design", False),
+            "optimization.prefer_radial_design",
+        ),
     )
     enforce_layer_nesting = _boolean(
         geometry.get("enforce_layer_nesting", True),
@@ -276,7 +281,6 @@ def load_campaign(path: str | Path) -> CampaignDefinition:
             "max_nesting_repair_deg",
         ),
     )
-    optimization = _mapping(raw, "optimization")
     if optimization.get("refinement") is not None:
         raise ValueError(
             "optimization.refinement has been removed; DOT now returns the certified NSGA-II "

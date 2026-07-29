@@ -36,6 +36,31 @@ def test_problem_evaluates_both_objectives_for_feasible_geometry() -> None:
 
     assert problem.constraint_names == ("geometry",)
     assert constraints[0] <= 0.0
+
+
+def test_problem_exposes_radiality_only_as_a_target_gated_preference_signal() -> None:
+    targets = _targets(
+        max_harmonic_units=1.0e9,
+        min_margin_percent=0.0,
+        prefer_radial_design=True,
+    )
+    problem = DipoleOptimizationProblem(_topology(), targets, _feasibility())
+    genome = np.asarray([12.0, 10.0, 1.0, 45.0, 1.0, 1.0, 0.0])
+
+    objectives, constraints, radiality, eligible = problem.evaluate(
+        genome,
+        return_values_of=[
+            "F",
+            "G",
+            "radiality",
+            "radial_preference_eligible",
+        ],
+    )
+
+    assert np.all(np.isfinite(objectives))
+    assert np.all(constraints <= 0.0)
+    assert np.isfinite(radiality)
+    assert bool(eligible)
     assert objectives[0] < 1.0e12
     assert objectives[1] < 0.0
 
@@ -249,6 +274,7 @@ def _targets(
     min_margin_percent: float | None = None,
     max_total_turns: int | None = None,
     max_turns_per_layer: int | None = None,
+    prefer_radial_design: bool = False,
 ) -> OptimizationTargets:
     return OptimizationTargets(
         target_bore_field_t=0.02,
@@ -262,6 +288,7 @@ def _targets(
         max_current_a=max_current_a,
         max_total_turns=max_total_turns,
         max_turns_per_layer=max_turns_per_layer,
+        prefer_radial_design=prefer_radial_design,
     )
 
 

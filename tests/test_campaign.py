@@ -102,6 +102,17 @@ def test_campaign_rejects_removed_refinement_stage(tmp_path: Path) -> None:
         load_campaign(config)
 
 
+def test_campaign_accepts_optional_radial_preference(tmp_path: Path) -> None:
+    raw = _portable_sample_config()
+    raw["optimization"]["prefer_radial_design"] = True
+    config = tmp_path / "radial-preference.json"
+    config.write_text(json.dumps(raw), encoding="utf-8")
+
+    campaign = load_campaign(config)
+
+    assert campaign.targets.prefer_radial_design is True
+
+
 def test_campaign_accepts_minimum_and_equal_fixed_current_bounds(tmp_path: Path) -> None:
     raw = _portable_sample_config()
     raw["acceptance"]["min_current_a"] = 11850.0
@@ -258,7 +269,7 @@ def test_result_document_marks_quick_empty_archive_honestly() -> None:
     }
     assert {row["role"] for row in document["inputs"]} == {"campaign", "cadata"}
     assert all(len(row["sha256"]) == 64 for row in document["inputs"])
-    assert document["software"]["dot_version"] == "1.0.0"
+    assert document["software"]["dot_version"] == "1.1.0"
     assert document["software"]["packages"]["numpy"]
 
 
