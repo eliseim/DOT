@@ -33,6 +33,7 @@ from dot.optimize.runner import (
     PhiOrderingRepair,
     RadialCompactionRepair,
     TurnBudgetRepair,
+    TargetMetRadialArchive,
     _certify_candidate,
     _assign_sector_turns,
     _mixed_variable_nsga2,
@@ -97,6 +98,28 @@ def test_run_campaign_returns_feasible_candidates_with_consistent_objectives() -
 
     assert candidate.objectives[0] == pytest.approx(field_quality, rel=1.0e-12)
     assert candidate.objectives[1] == pytest.approx(-margin, rel=1.0e-12)
+
+
+def test_run_campaign_certifies_persistent_radial_archive() -> None:
+    topology = _topology()
+    targets = replace(
+        _targets(),
+        max_harmonic_units=1.0e6,
+        min_margin_percent=0.0,
+        prefer_radial_design=True,
+    )
+
+    result = run_campaign(
+        topology,
+        targets,
+        _feasibility(),
+        pop_size=12,
+        n_gen=6,
+        seed=17,
+    )
+
+    assert result.radial_archive
+    assert all(candidate.certified for candidate in result.radial_archive)
 
 
 def test_certification_uses_signed_harmonic_target_residual() -> None:
@@ -555,9 +578,7 @@ def test_parallel_repair_matches_serial_sampling_exactly() -> None:
     finally:
         parallel_problem.close()
 
-    assert [candidate.X for candidate in parallel] == [
-        candidate.X for candidate in serial
-    ]
+    assert [candidate.X for candidate in parallel] == [candidate.X for candidate in serial]
 
 
 def test_mixed_variable_sampling_and_mating_keep_turn_genes_integer() -> None:
@@ -987,6 +1008,7 @@ def test_feasibility_aware_mating_degrades_gracefully_when_fallback_also_fails(
 def test_radial_mating_trials_start_only_after_a_target_met_parent_exists() -> None:
     topology = _topology()
     feasibility = _feasibility()
+    targets = _targets()
     sample = {
         "layer_0_inner_radius_mm": 20.0,
         "layer_0_block_0_phi_deg": 10.0,
@@ -1001,23 +1023,29 @@ def test_radial_mating_trials_start_only_after_a_target_met_parent_exists() -> N
         topology,
         topology.cables,
     )
+    unrelated_offspring = dict(sample)
+    unrelated_offspring["layer_0_block_1_phi_deg"] = 60.0
+    unrelated_offspring["layer_0_block_1_alpha_deg"] = 15.0
     adaptive = FeasibilityAwareMating(
         topology,
         feasibility,
-        _StubMating([sample]),
+        _StubMating([sample, unrelated_offspring]),
         ConstructiveMixedVariableSampling(topology, feasibility),
         prefer_radial_design=True,
+        radial_archive=TargetMetRadialArchive(topology, targets),
         radial_trial_fraction=1.0,
         radial_activation_delay_generations=0,
     )
 
     not_ready = Population.new(X=[dict(sample)])
     not_ready.set("radial_preference_eligible", np.asarray([False]))
+    not_ready.set("F", np.asarray([[1.0, -30.0]]))
     unchanged = adaptive.do(None, not_ready, 1, random_state=np.random.RandomState(2))
     assert unchanged[0].X["layer_0_block_1_alpha_deg"] == -10.0
 
     ready = Population.new(X=[dict(sample)])
     ready.set("radial_preference_eligible", np.asarray([True]))
+    ready.set("F", np.asarray([[1.0, -30.0]]))
     radialized = adaptive.do(None, ready, 1, random_state=np.random.RandomState(2))
     after = decode(
         flatten_mixed_genome(radialized[0].X, topology),
@@ -1026,9 +1054,55 @@ def test_radial_mating_trials_start_only_after_a_target_met_parent_exists() -> N
     )
 
     assert adaptive.radial_trial_count_history == [0, 1]
-    assert block_radiality(after.layers[0].blocks[1]).deviation_deg < block_radiality(
-        before.layers[0].blocks[1]
-    ).deviation_deg
+    assert after.layers[0].blocks[1].phi_deg != pytest.approx(before.layers[0].blocks[1].phi_deg)
+    assert after.layers[0].blocks[1].alpha_deg != pytest.approx(
+        before.layers[0].blocks[1].alpha_deg
+    )
+    assert after.layers[0].blocks[1].phi_deg < 30.0
+    assert after.layers[0].blocks[1].alpha_deg < 0.0
+    assert (
+        block_radiality(after.layers[0].blocks[1]).deviation_deg
+        < block_radiality(before.layers[0].blocks[1]).deviation_deg
+    )
+
+
+def test_target_met_radial_archive_persists_em_dominated_layouts() -> None:
+    topology = _topology()
+    targets = replace(
+        _targets(),
+        max_harmonic_units=5.0,
+        min_margin_percent=20.0,
+        prefer_radial_design=True,
+    )
+    nonradial = {
+        "layer_0_inner_radius_mm": 20.0,
+        "layer_0_block_0_phi_deg": 10.0,
+        "layer_0_block_0_n_turns": 1,
+        "layer_0_block_1_phi_deg": 30.0,
+        "layer_0_block_1_n_turns": 1,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": -10.0,
+    }
+    more_radial = dict(nonradial)
+    more_radial["layer_0_block_1_alpha_deg"] = 20.0
+    population = Population.new(X=[nonradial, more_radial])
+    # The more-radial layout is strictly EM-dominated but is still inside the
+    # target box and must not be discarded from this secondary archive.
+    population.set("F", np.asarray([[1.0, -30.0], [2.0, -25.0]]))
+    population.set("radial_preference_eligible", np.asarray([True, True]))
+    archive = TargetMetRadialArchive(topology, targets)
+
+    archive.update_from_population(population)
+
+    assert len(archive.candidates) == 2
+    assert archive.candidates[0].objectives == pytest.approx((2.0, -25.0))
+
+    later = Population.new(X=[nonradial])
+    later.set("F", np.asarray([[8.0, -10.0]]))
+    later.set("radial_preference_eligible", np.asarray([False]))
+    archive.update_from_population(later)
+
+    assert len(archive.candidates) == 2
 
 
 def test_ground_truth_repair_shrinks_pole_ward_block_to_real_feasibility() -> None:

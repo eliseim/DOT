@@ -23,7 +23,7 @@ from pymoo.operators.mutation.rm import ChoiceRandomMutation
 from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 
-from dot.geometry import DipoleDesign, radialized_block_alpha_deg
+from dot.geometry import DipoleDesign, radiality_summary, radialized_block_alpha_deg
 from dot.geometry.constraints import (
     check_extended_lower_edge_nesting,
     check_feasibility,
@@ -78,6 +78,11 @@ class ParetoResult:
     # inside the target box: the ten-item near-feasible diagnostic list is
     # intentionally too small to represent the engineering trade-off.
     search_front: tuple[ParetoCandidate, ...] = ()
+    # Certified target-met layouts retained for radial quality even when an
+    # electromagnetically superior target-met point dominates them. This is
+    # deliberately separate from ``candidates`` so the latter remains a true
+    # electromagnetic Pareto front.
+    radial_archive: tuple[ParetoCandidate, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +104,138 @@ class CampaignCancelled(RuntimeError):
     """Raised after a generation when a cooperative stop is requested."""
 
 
+class TargetMetRadialArchive:
+    """Bounded persistent archive of target-met radial-search elites.
+
+    Electromagnetic dominance is intentionally not a pruning rule here. Once a
+    target-met layout has been observed, the archive retains the most radial
+    representatives (with one representative per block-count topology before
+    filling the remaining capacity). Final campaign acceptance still requires
+    the normal immutable geometry and electromagnetic certification.
+    """
+
+    def __init__(
+        self,
+        topology: Topology,
+        targets: OptimizationTargets,
+        *,
+        capacity: int = 96,
+    ) -> None:
+        if capacity < 1:
+            raise ValueError("radial archive capacity must be positive")
+        self.topology = topology
+        self.targets = targets
+        self.capacity = capacity
+        self._entries: dict[tuple[object, ...], ParetoCandidate] = {}
+        self._scores: dict[tuple[object, ...], tuple[float, float, int, int]] = {}
+        self._ordered_cache: tuple[ParetoCandidate, ...] | None = None
+
+    @property
+    def candidates(self) -> tuple[ParetoCandidate, ...]:
+        if self._ordered_cache is None:
+            ordered_keys = sorted(self._entries, key=self._scores.__getitem__)
+            self._ordered_cache = tuple(self._entries[key] for key in ordered_keys)
+        return self._ordered_cache
+
+    def update_from_population(self, population) -> int:  # noqa: ANN001
+        """Add target-met population members without EM-dominance filtering."""
+
+        if population is None:
+            return 0
+        eligible = population.get("radial_preference_eligible")
+        x = population.get("X")
+        f = population.get("F")
+        if eligible is None or x is None or f is None:
+            return 0
+        flags = np.asarray(eligible, dtype=bool).reshape(-1)
+        genomes = _result_genomes(x, self.topology)
+        objectives = np.atleast_2d(np.asarray(f, dtype=float))
+        added = 0
+        for genome, objective, is_eligible in zip(
+            genomes,
+            objectives,
+            flags,
+            strict=False,
+        ):
+            if not is_eligible or not self._targets_met(objective):
+                continue
+            try:
+                unit_design = decode(genome, self.topology, self.topology.cables)
+            except (KeyError, ValueError, ZeroDivisionError):
+                continue
+            candidate = ParetoCandidate(
+                genome=np.asarray(genome, dtype=float),
+                design=unit_design,
+                objectives=(float(objective[0]), float(objective[1])),
+                harmonic_targets=self.targets.harmonic_targets,
+            )
+            key = _design_key(candidate.design)
+            candidate_score = self._score(candidate)
+            if key not in self._entries or candidate_score < self._scores[key]:
+                self._entries[key] = candidate
+                self._scores[key] = candidate_score
+                self._ordered_cache = None
+                added += 1
+        self._prune()
+        return added
+
+    def mixed_sample(self, index: int) -> dict[str, object] | None:
+        entries = self.candidates
+        if not entries:
+            return None
+        return _mixed_genome_from_flat(
+            entries[index % len(entries)].genome,
+            self.topology,
+        )
+
+    def _targets_met(self, objective: np.ndarray) -> bool:
+        if len(objective) < 2 or not np.all(np.isfinite(objective[:2])):
+            return False
+        harmonic = float(objective[0])
+        margin = -float(objective[1])
+        return (
+            self.targets.max_harmonic_units is None or harmonic <= self.targets.max_harmonic_units
+        ) and (self.targets.min_margin_percent is None or margin >= self.targets.min_margin_percent)
+
+    def _score(self, candidate: ParetoCandidate) -> tuple[float, float, int, int]:
+        radiality = radiality_summary(
+            candidate.design,
+            include_midplane_blocks=False,
+        ).rms_deviation_deg
+        target_score = _generation_candidate_score(
+            np.asarray(candidate.objectives, dtype=float),
+            self.targets,
+        )[1]
+        turns, blocks = _design_complexity(candidate.design)
+        return radiality, target_score, turns, blocks
+
+    def _prune(self) -> None:
+        if len(self._entries) <= self.capacity:
+            return
+        ordered = sorted(
+            self._entries.items(),
+            key=lambda item: self._scores[item[0]],
+        )
+        retained: list[tuple[tuple[object, ...], ParetoCandidate]] = []
+        represented_topologies: set[tuple[int, ...]] = set()
+        for item in ordered:
+            topology_key = tuple(len(layer.blocks) for layer in item[1].design.layers)
+            if topology_key in represented_topologies:
+                continue
+            retained.append(item)
+            represented_topologies.add(topology_key)
+            if len(retained) >= self.capacity:
+                break
+        if len(retained) < self.capacity:
+            retained_keys = {key for key, _candidate in retained}
+            retained.extend(item for item in ordered if item[0] not in retained_keys)
+        retained = retained[: self.capacity]
+        self._entries = dict(retained)
+        self._scores = {key: self._scores[key] for key, _candidate in retained}
+        ordered_keys = sorted(self._entries, key=self._scores.__getitem__)
+        self._ordered_cache = tuple(self._entries[key] for key in ordered_keys)
+
+
 def merge_pareto_results(
     results: list[ParetoResult],
     topology: Topology,
@@ -118,10 +255,17 @@ def merge_pareto_results(
     search_front = _search_nondominated(
         [candidate for result in results for candidate in result.search_front]
     )
+    radial_archive = _certified_radial_archive(
+        [candidate for result in results for candidate in result.radial_archive],
+        topology,
+        targets,
+        feasibility,
+    )
     return ParetoResult(
         candidates=_certified_nondominated(candidates, topology, targets, feasibility),
         near_feasible=tuple(near_feasible),
         search_front=search_front,
+        radial_archive=radial_archive,
     )
 
 
@@ -1212,9 +1356,7 @@ def best_generation_candidate(
     topology: Topology,
     pop,
     targets: OptimizationTargets | None = None,
-) -> (
-    tuple[DipoleDesign, tuple[float | None, float | None], float | None] | None
-):  # noqa: ANN001
+) -> tuple[DipoleDesign, tuple[float | None, float | None], float | None] | None:  # noqa: ANN001
     """Decode the population's best-so-far individual for live GUI reporting.
 
     Among hard-feasible individuals, prefer one that is
@@ -1299,9 +1441,25 @@ def run_campaign(
     """
 
     problem = DipoleOptimizationProblem(topology, targets, feasibility, n_workers=n_workers)
-    algorithm = _mixed_variable_nsga2(topology, feasibility, pop_size, targets)
+    radial_search_archive = (
+        TargetMetRadialArchive(topology, targets) if targets.prefer_radial_design else None
+    )
+    algorithm = _mixed_variable_nsga2(
+        topology,
+        feasibility,
+        pop_size,
+        targets,
+        radial_archive=radial_search_archive,
+    )
 
     def _advance_generation(algorithm) -> None:  # noqa: ANN001
+        if radial_search_archive is not None:
+            # ``off`` is captured before survival can discard an
+            # electromagnetically dominated but target-met radial candidate.
+            radial_search_archive.update_from_population(
+                getattr(algorithm, "off", None)
+            )
+            radial_search_archive.update_from_population(algorithm.pop)
         if on_generation is not None:
             best = None
             margin_percent = None
@@ -1349,6 +1507,11 @@ def run_campaign(
     # population and certify it below against immutable targets.
     final_algorithm = getattr(result, "algorithm", None)
     final_population = getattr(final_algorithm, "pop", None)
+    if radial_search_archive is not None:
+        radial_search_archive.update_from_population(
+            getattr(final_algorithm, "off", None)
+        )
+        radial_search_archive.update_from_population(final_population)
     pop_x = final_population.get("X") if final_population is not None else None
     genomes = _result_genomes(pop_x, topology)
     pop_f = (
@@ -1424,6 +1587,16 @@ def run_campaign(
     search_candidates = list(candidates)
     search_front = list(_search_nondominated(search_candidates))
     candidates = list(_certified_nondominated(search_candidates, topology, targets, feasibility))
+    radial_candidates = (
+        _certified_radial_archive(
+            list(radial_search_archive.candidates),
+            topology,
+            targets,
+            feasibility,
+        )
+        if radial_search_archive is not None
+        else ()
+    )
     near_feasible.sort(
         key=lambda item: (
             item.max_violation,
@@ -1435,6 +1608,7 @@ def run_campaign(
         candidates=tuple(candidates),
         near_feasible=tuple(near_feasible[:10]),
         search_front=tuple(search_front),
+        radial_archive=radial_candidates,
     )
 
 
@@ -1470,6 +1644,51 @@ def _certified_nondominated(
     rank_zero = _prefer_simpler_equivalents(rank_zero)
     rank_zero.sort(key=lambda item: (*item.objectives, *_design_complexity(item.design)))
     return tuple(rank_zero)
+
+
+def _certified_radial_archive(
+    candidates: list[ParetoCandidate],
+    topology: Topology,
+    targets: OptimizationTargets,
+    feasibility: FeasibilitySettings,
+    *,
+    capacity: int = 96,
+) -> tuple[ParetoCandidate, ...]:
+    """Certify target-met radial elites without applying EM dominance."""
+
+    certified_by_design: dict[tuple[object, ...], ParetoCandidate] = {}
+    for candidate in candidates:
+        checked = _certify_candidate(candidate, topology, targets, feasibility)
+        if checked is None:
+            continue
+        key = _design_key(checked.design)
+        existing = certified_by_design.get(key)
+        if existing is None or _radial_archive_score(checked, targets) < _radial_archive_score(
+            existing,
+            targets,
+        ):
+            certified_by_design[key] = checked
+
+    ordered = sorted(
+        certified_by_design.values(),
+        key=lambda item: _radial_archive_score(item, targets),
+    )
+    return tuple(ordered[:capacity])
+
+
+def _radial_archive_score(
+    candidate: ParetoCandidate,
+    targets: OptimizationTargets,
+) -> tuple[float, float, int, int]:
+    radiality = radiality_summary(
+        candidate.design,
+        include_midplane_blocks=False,
+    ).rms_deviation_deg
+    target_score = _generation_candidate_score(
+        np.asarray(candidate.objectives, dtype=float),
+        targets,
+    )[1]
+    return radiality, target_score, *_design_complexity(candidate.design)
 
 
 def _certify_candidate(
@@ -1674,6 +1893,7 @@ class FeasibilityAwareMating(InfillCriterion):
         *,
         repair: CampaignRepair | None = None,
         prefer_radial_design: bool = False,
+        radial_archive: TargetMetRadialArchive | None = None,
         radial_trial_fraction: float = 0.05,
         radial_activation_delay_generations: int = 3,
         max_regeneration_attempts: int = 3,
@@ -1689,9 +1909,11 @@ class FeasibilityAwareMating(InfillCriterion):
         self.sampling = sampling
         self.repair = repair
         self.prefer_radial_design = prefer_radial_design
+        self.radial_archive = radial_archive
         self.radial_trial_fraction = radial_trial_fraction
         self.radial_activation_delay_generations = radial_activation_delay_generations
-        self._radial_target_streak = 0
+        self._radial_archive_generations = 0
+        self._radial_trial_serial = 0
         self.max_regeneration_attempts = max_regeneration_attempts
         self.valid_fraction_history: list[float] = []
         self.radial_trial_count_history: list[int] = []
@@ -1733,17 +1955,21 @@ class FeasibilityAwareMating(InfillCriterion):
         offspring,
         random_state,
     ) -> int:  # noqa: ANN001
-        """Radialize a small offspring subset only after a target-met parent exists."""
+        """Seed gradual radial trials from persistent target-met elites."""
 
         if not self.prefer_radial_design or self.radial_trial_fraction <= 0.0:
             return 0
-        eligible = pop.get("radial_preference_eligible")
-        if eligible is None or not np.any(np.asarray(eligible, dtype=bool)):
-            self._radial_target_streak = 0
+        if self.radial_archive is None:
             return 0
-        self._radial_target_streak += 1
+        # This update makes the mating operator independently robust while the
+        # generation callback also captures the last population (which may not
+        # be followed by another mating call).
+        self.radial_archive.update_from_population(pop)
+        if not self.radial_archive.candidates:
+            return 0
+        self._radial_archive_generations += 1
         required = max(1, self.radial_activation_delay_generations)
-        if self._radial_target_streak < required:
+        if self._radial_archive_generations < required:
             return 0
         total = len(offspring)
         trial_count = min(
@@ -1754,21 +1980,29 @@ class FeasibilityAwareMating(InfillCriterion):
         # the normal offspring stream should remain as close as possible to
         # the same-seed baseline; only the selected trial genomes differ.
         stride = max(1, total // trial_count)
-        offset = (self._radial_target_streak - required) % total
+        offset = (self._radial_archive_generations - required) % total
         indices = np.asarray(
             [(offset + trial_index * stride) % total for trial_index in range(trial_count)],
             dtype=int,
         )
         trials: list[dict[str, object]] = []
+        sources: list[dict[str, object]] = []
         trial_indices: list[int] = []
-        for index in indices:
-            sample = offspring[int(index)].get("X")
-            if not isinstance(sample, dict):
+        for local_index, index in enumerate(indices):
+            source = self.radial_archive.mixed_sample(self._radial_trial_serial + local_index)
+            if source is None:
                 continue
-            trials.append(self._radialize_sample(sample))
+            trials.append(
+                self._gradually_radialize_sample(
+                    source,
+                    self._radial_trial_serial + local_index,
+                )
+            )
+            sources.append(source)
             trial_indices.append(int(index))
         if not trials:
             return 0
+        self._radial_trial_serial += len(trials)
 
         repaired: np.ndarray | list[dict[str, object]]
         if self.repair is None:
@@ -1778,20 +2012,39 @@ class FeasibilityAwareMating(InfillCriterion):
                 problem,
                 np.asarray(trials, dtype=object),
             )
-        for index, sample in zip(trial_indices, repaired, strict=True):
+        accepted = 0
+        for index, source, sample in zip(
+            trial_indices,
+            sources,
+            repaired,
+            strict=True,
+        ):
+            if not self._is_valid(sample):
+                continue
+            if not self._same_discrete_genes(source, sample):
+                continue
+            if self._sample_radiality(sample) >= self._sample_radiality(source) - 1.0e-9:
+                continue
             offspring[index].set("X", sample)
-        return len(trial_indices)
+            accepted += 1
+        return accepted
 
-    def _radialize_sample(
+    def _gradually_radialize_sample(
         self,
         sample: dict[str, object],
+        trial_index: int,
     ) -> dict[str, object]:
+        """Move one misaligned free block by a small coupled phi/alpha step."""
+
         radialized = dict(sample)
         design = decode(
             flatten_mixed_genome(radialized, self.topology),
             self.topology,
             self.topology.cables,
         )
+        adjustable: list[
+            tuple[float, int, int, object, tuple[float, float], tuple[float, float]]
+        ] = []
         for layer_index, (layer, layer_topology) in enumerate(
             zip(design.layers, self.topology.layers, strict=True)
         ):
@@ -1809,13 +2062,82 @@ class FeasibilityAwareMating(InfillCriterion):
                 # alpha gene. Only free block angles participate.
                 if genome_block_index == 0:
                     continue
-                radialized[
-                    f"layer_{layer_index}_block_{genome_block_index}_alpha_deg"
-                ] = radialized_block_alpha_deg(
+                target_alpha = radialized_block_alpha_deg(
                     block,
                     layer_topology.alpha_bounds_deg,
                 )
+                adjustable.append(
+                    (
+                        abs(target_alpha - block.alpha_deg),
+                        layer_index,
+                        genome_block_index,
+                        block,
+                        layer_topology.phi_bounds_deg,
+                        layer_topology.alpha_bounds_deg,
+                    )
+                )
+        if not adjustable:
+            return radialized
+
+        # Work on one block at a time so target satisfaction can be checked
+        # after every modest change. Cycling through the largest deviations
+        # lets successful descendants re-enter the archive and improve again.
+        adjustable.sort(key=lambda item: item[0], reverse=True)
+        (
+            _deviation,
+            layer_index,
+            genome_block_index,
+            block,
+            phi_bounds,
+            alpha_bounds,
+        ) = adjustable[(trial_index // 3) % len(adjustable)]
+        target_alpha = radialized_block_alpha_deg(block, alpha_bounds)
+        correction = target_alpha - block.alpha_deg
+        step_fraction = (0.06, 0.10, 0.16)[trial_index % 3]
+        # Split the alignment correction between both free angles. Moving phi
+        # opposite to the required alpha change reduces the center-position /
+        # cable-axis mismatch while preserving a gradual, repairable move.
+        alpha_fraction = 0.75 * step_fraction
+        phi_fraction = 0.25 * step_fraction
+        phi_name = f"layer_{layer_index}_block_{genome_block_index}_phi_deg"
+        alpha_name = f"layer_{layer_index}_block_{genome_block_index}_alpha_deg"
+        radialized[alpha_name] = min(
+            max(block.alpha_deg + alpha_fraction * correction, alpha_bounds[0]),
+            alpha_bounds[1],
+        )
+        radialized[phi_name] = min(
+            max(block.phi_deg - phi_fraction * correction, phi_bounds[0]),
+            phi_bounds[1],
+        )
         return radialized
+
+    def _sample_radiality(self, sample: dict[str, object]) -> float:
+        try:
+            design = decode(
+                flatten_mixed_genome(sample, self.topology),
+                self.topology,
+                self.topology.cables,
+            )
+            return radiality_summary(
+                design,
+                include_midplane_blocks=False,
+            ).rms_deviation_deg
+        except (KeyError, ValueError, ZeroDivisionError):
+            return math.inf
+
+    def _same_discrete_genes(
+        self,
+        source: dict[str, object],
+        trial: dict[str, object],
+    ) -> bool:
+        """Keep a radial trial's topology and turn counts identical to its elite."""
+
+        for variable in genome_variables(self.topology):
+            if variable.kind not in {"binary", "integer"}:
+                continue
+            if int(round(float(source[variable.name]))) != int(round(float(trial[variable.name]))):
+                return False
+        return True
 
     def _do(self, problem, pop, n_offsprings, random_state=None, **kwargs):  # noqa: ANN001, ANN003
         # Required by InfillCriterion's abstract interface, but this class
@@ -1863,6 +2185,8 @@ def _mixed_variable_nsga2(
     feasibility: FeasibilitySettings,
     pop_size: int,
     targets: OptimizationTargets,
+    *,
+    radial_archive: TargetMetRadialArchive | None = None,
 ) -> NSGA2:
     # pymoo's default duplicate elimination converts X to a float array, which
     # crashes for dict-valued mixed-variable genomes. Keep it disabled until DOT
@@ -1904,6 +2228,7 @@ def _mixed_variable_nsga2(
         sampling,
         repair=repair,
         prefer_radial_design=targets.prefer_radial_design,
+        radial_archive=radial_archive,
     )
     return NSGA2(
         pop_size=pop_size,
@@ -1924,6 +2249,27 @@ def _result_genomes(x, topology: Topology) -> np.ndarray:  # noqa: ANN001
     if isinstance(x, list) and x and isinstance(x[0], dict):
         return np.asarray([flatten_mixed_genome(row, topology) for row in x], dtype=float)
     return np.atleast_2d(np.asarray(x, dtype=float))
+
+
+def _mixed_genome_from_flat(
+    genome: np.ndarray,
+    topology: Topology,
+) -> dict[str, object]:
+    """Restore a typed pymoo mixed-variable mapping from DOT's flat genome."""
+
+    values = np.asarray(genome, dtype=float)
+    if values.shape != (topology.n_var,):
+        raise ValueError(f"genome must have shape ({topology.n_var},), got {values.shape}")
+    sample: dict[str, object] = {}
+    for variable in genome_variables(topology):
+        value = float(values[variable.index])
+        if variable.kind == "binary":
+            sample[variable.name] = bool(int(round(value)))
+        elif variable.kind == "integer":
+            sample[variable.name] = int(round(value))
+        else:
+            sample[variable.name] = value
+    return sample
 
 
 def _minimum_phi_gap_deg(

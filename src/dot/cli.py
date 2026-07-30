@@ -15,6 +15,7 @@ from dot.results import (
     best_candidate_index,
     export_campaign_results,
     export_no_candidate_result,
+    selection_candidates,
 )
 
 
@@ -26,7 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--output", type=Path, required=True)
     optimize.add_argument("--population", type=int, help="override configured population")
     optimize.add_argument("--generations", type=int, help="override configured generations")
-    optimize.add_argument("--seed", type=int, action="append", help="override seeds; repeat for multiple")
+    optimize.add_argument(
+        "--seed", type=int, action="append", help="override seeds; repeat for multiple"
+    )
     optimize.add_argument("--workers", type=int, help="override configured worker count")
     optimize.add_argument(
         "--quick",
@@ -111,8 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"  generation {generation}/{total_generations} "
                 f"({100.0 * generation / total_generations:5.1f}%)  "
                 f"elapsed {format_duration(tracker.elapsed_seconds)}  "
-                f"ETA {format_duration(tracker.eta_seconds)}  "
-                + "  ".join(metrics),
+                f"ETA {format_duration(tracker.eta_seconds)}  " + "  ".join(metrics),
                 flush=True,
             )
             if design is None:
@@ -141,15 +143,21 @@ def main(argv: list[str] | None = None) -> int:
             n_workers=workers,
             on_generation=_on_generation,
         )
-        print(f"seed {seed}: {len(result.candidates)} certified Pareto candidates")
-        if not result.candidates and result.near_feasible:
+        certified_seed_pool = selection_candidates(result)
+        print(
+            f"seed {seed}: {len(result.candidates)} certified Pareto candidates, "
+            f"{len(result.radial_archive)} certified radial-archive candidates"
+        )
+        if not certified_seed_pool and result.near_feasible:
             closest = result.near_feasible[0]
             active = ", ".join(
                 f"{name}={value:.3g}"
                 for name, value in closest.normalized_violations
                 if value > 0.0
             )
-            print(f"seed {seed}: closest search candidate violations: {active or 'certification only'}")
+            print(
+                f"seed {seed}: closest search candidate violations: {active or 'certification only'}"
+            )
         results.append(result)
     merged = merge_pareto_results(
         results,
@@ -166,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         "workers": workers,
     }
     destination.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    if merged.candidates:
+    certified_pool = selection_candidates(merged)
+    if certified_pool:
         representative_index = best_candidate_index(
             merged,
             max_harmonic_units=campaign.targets.max_harmonic_units,
@@ -196,8 +205,8 @@ def main(argv: list[str] | None = None) -> int:
             max_harmonic_units=campaign.targets.max_harmonic_units,
             min_margin_percent=campaign.targets.min_margin_percent,
         )
-    print(f"wrote {destination} ({len(merged.candidates)} certified candidates)")
-    return 0 if merged.candidates or args.quick else 2
+    print(f"wrote {destination} ({len(certified_pool)} selectable certified candidates)")
+    return 0 if certified_pool or args.quick else 2
 
 
 def _design_current(design) -> float:  # noqa: ANN001

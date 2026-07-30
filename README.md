@@ -47,15 +47,20 @@ Every generation follows the same loop:
 5. rank candidates by two objectives: lower worst harmonic residual and higher minimum margin;
 6. preserve non-dominated candidates, objective-space diversity, and distinct block topologies.
 
-When the optional radial-block preference is enabled, it remains inactive until target-met
-candidates persist for three generations. It then uses a small part of later generations to align
-each free-angle block's central cable with its local radial direction. This never relaxes a
-geometry constraint and never promotes a candidate from a worse Pareto rank.
+When the optional radial-block preference is enabled, every target-met candidate can enter a
+separate persistent radial archive even if another target-met layout is electromagnetically
+better. After the archive has existed for three reproduction cycles, 5% of later offspring are
+seeded from its elites. A trial gradually adapts one free block's `phi` and `alpha`, keeps its
+turns and topology fixed, and is admitted only when the complete geometry checks pass and radial
+RMS improves. The normal electromagnetic Pareto front remains unchanged.
 
 After the final generation, DOT independently recalculates the non-dominated search archive
 with fixed final numerical settings. A candidate is certified only if it then meets every requested
 harmonic, margin, current, turn, and geometry limit. Electromagnetically equivalent candidates
 are tie-broken in favor of fewer turns and then fewer blocks.
+If the radial option is enabled and certified target-met archive entries exist, final selection
+compares radial alignment immediately after target satisfaction; surplus harmonic or margin
+performance is the following tie-breaker.
 
 There is no hidden weighted sum, local-refinement stage, annealed target mode, or reference-magnet
 layout in the optimization loop.

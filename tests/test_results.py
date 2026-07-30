@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 from matplotlib import image as mpimg
 
-from dot.geometry import Block, CableSpec, DipoleDesign, Layer
+from dot.geometry import (
+    Block,
+    CableSpec,
+    DipoleDesign,
+    Layer,
+    radialized_block_alpha_deg,
+)
 from dot.optimize.objectives import BlockMarginRecord, LayerMarginRecord
 from dot.optimize.runner import ParetoCandidate, ParetoResult
 from dot.results import (
@@ -20,6 +26,7 @@ from dot.results import (
     export_no_candidate_result,
     inter_block_clearance_rows,
     candidate_summary_figure,
+    selection_candidates,
 )
 
 
@@ -165,11 +172,46 @@ def test_best_candidate_index_prefers_fewer_turns_then_fewer_blocks_on_em_ties()
     )
     result = ParetoResult(candidates=(base, same_turns_more_blocks, fewer_turns))
 
-    assert best_candidate_index(
-        result,
-        max_harmonic_units=5.0,
-        min_margin_percent=25.0,
-    ) == 2
+    assert (
+        best_candidate_index(
+            result,
+            max_harmonic_units=5.0,
+            min_margin_percent=25.0,
+        )
+        == 2
+    )
+
+
+def test_final_selection_prefers_radiality_after_targets_are_met() -> None:
+    electromagnetic_best = replace(_candidate(), objectives=(1.0, -30.0))
+    layer = electromagnetic_best.design.layers[0]
+    free_block = layer.blocks[1]
+    radial_block = replace(
+        free_block,
+        alpha_deg=radialized_block_alpha_deg(free_block, (-20.0, 80.0)),
+    )
+    radial_target_met = replace(
+        electromagnetic_best,
+        design=replace(
+            electromagnetic_best.design,
+            layers=(replace(layer, blocks=(layer.blocks[0], radial_block)),),
+        ),
+        objectives=(4.0, -25.0),
+    )
+    result = ParetoResult(
+        candidates=(electromagnetic_best,),
+        radial_archive=(radial_target_met,),
+    )
+
+    assert len(selection_candidates(result)) == 2
+    assert (
+        best_candidate_index(
+            result,
+            max_harmonic_units=5.0,
+            min_margin_percent=25.0,
+        )
+        == 1
+    )
 
 
 def test_diverse_shortlist_keeps_only_best_design_per_topology() -> None:
@@ -178,8 +220,7 @@ def test_diverse_shortlist_keeps_only_best_design_per_topology() -> None:
 
     def with_blocks(count: int, harmonic: float) -> ParetoCandidate:
         blocks = tuple(
-            Block(10.0 + 15.0 * index, 0.0, 1, cable, 10.0, 500.0)
-            for index in range(count)
+            Block(10.0 + 15.0 * index, 0.0, 1, cable, 10.0, 500.0) for index in range(count)
         )
         return replace(
             base,
@@ -243,6 +284,30 @@ def test_export_campaign_results_writes_designer_artifacts(tmp_path) -> None:  #
     assert summary_image.stat().st_size > 0
     pixels = mpimg.imread(summary_image)
     assert pixels.shape[1] > pixels.shape[0]
+
+
+def test_export_accepts_certified_radial_archive_without_final_em_front(
+    tmp_path,
+) -> None:  # noqa: ANN001
+    result = ParetoResult(candidates=(), radial_archive=(_candidate(),))
+
+    best_index = best_candidate_index(
+        result,
+        max_harmonic_units=5.0,
+        min_margin_percent=25.0,
+    )
+    artifacts = export_campaign_results(
+        tmp_path,
+        result,
+        best_index=best_index,
+        campaign_name="radial-only",
+        reference_radius_mm=5.0,
+    )
+
+    document = json.loads(artifacts.pareto_json.read_text(encoding="utf-8"))
+    assert document["candidate_count"] == 1
+    assert document["electromagnetic_pareto_candidate_count"] == 0
+    assert document["radial_archive_candidate_count"] == 1
 
 
 def test_export_no_candidate_result_is_explicit(tmp_path) -> None:  # noqa: ANN001

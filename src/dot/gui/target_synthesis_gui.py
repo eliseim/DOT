@@ -44,6 +44,7 @@ from dot.results import (
     export_campaign_results,
     export_no_candidate_result,
     inter_block_clearance_rows,
+    selection_candidates,
 )
 
 from .campaign_runner import CampaignEvent, CampaignRunner
@@ -244,11 +245,11 @@ PARAMETER_HELP: dict[str, str] = {
         "hardware compatibility; enable it for larger populations after comparing one short run."
     ),
     "prefer_radial_design": (
-        "After target-met designs persist for three generations, use a small part of each later "
-        "generation to make the free-angle blocks more radial. Radial means "
-        "the central cable's polar angle is close to its cable-frame angle. Electromagnetic "
-        "objectives and every geometry constraint keep precedence; fixed midplane blocks are "
-        "not altered."
+        "Keep target-met layouts in a persistent radial archive. After three reproduction "
+        "cycles, use 5% of later offspring as gradual phi/alpha trials seeded from archived "
+        "elites. Radial means the central cable's polar angle is close to its cable-frame "
+        "angle. Trials preserve turns and topology and must pass every geometry check; fixed "
+        "midplane blocks are not altered."
     ),
 }
 
@@ -1429,8 +1430,7 @@ class App(tk.Tk):
                 )
                 summary_parts.append(f"{total_turns} turns")
             self.best_summary_var.set(
-                "Selected candidate: "
-                + (", ".join(summary_parts) if summary_parts else "--")
+                "Selected candidate: " + (", ".join(summary_parts) if summary_parts else "--")
             )
             self._update_convergence_panel(event.history)
         elif event.kind == "error":
@@ -1456,7 +1456,8 @@ class App(tk.Tk):
         campaign_name, reference_radius_mm, max_harmonic_units, min_margin_percent = (
             self._active_result_context()
         )
-        if not result.candidates:
+        candidates = selection_candidates(result)
+        if not candidates:
             self.result_var.set(
                 "No certified candidate met every target. See the saved near-feasible archive "
                 "and generation snapshots."
@@ -1485,7 +1486,7 @@ class App(tk.Tk):
             max_harmonic_units=max_harmonic_units,
             min_margin_percent=min_margin_percent,
         )
-        candidate = result.candidates[best_index]
+        candidate = candidates[best_index]
         achieved_field = _center_by(candidate.design)
         harmonic_units = candidate.objectives[0]
         margin_percent = -candidate.objectives[1]
@@ -1501,8 +1502,7 @@ class App(tk.Tk):
             include_midplane_blocks=False,
         )
         meets_targets = (
-            harmonic_units <= max_harmonic_units
-            and margin_percent >= min_margin_percent
+            harmonic_units <= max_harmonic_units and margin_percent >= min_margin_percent
         )
         self.result_var.set(
             "\n".join(
@@ -2011,9 +2011,7 @@ class App(tk.Tk):
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
             min_current_a=state["acceptance"].get("min_current_a"),
             max_current_a=state["acceptance"].get("max_current_a"),
-            prefer_radial_design=bool(
-                state["nsga2"].get("prefer_radial_design", False)
-            ),
+            prefer_radial_design=bool(state["nsga2"].get("prefer_radial_design", False)),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=0.0,

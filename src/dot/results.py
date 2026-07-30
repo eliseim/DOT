@@ -90,17 +90,44 @@ def best_candidate_index(
     max_harmonic_units: float | None,
     min_margin_percent: float | None,
 ) -> int:
-    """Select a balanced, target-aware representative of a Pareto archive."""
+    """Select the final representative from the certified candidate pool.
 
-    if not result.candidates:
+    When a radial archive exists, target satisfaction remains the first rule
+    and radial alignment becomes the next comparison. Additional harmonic or
+    margin improvement is used only after radiality.
+    """
+
+    candidates = selection_candidates(result)
+    if not candidates:
         raise ValueError("cannot select a best candidate from an empty archive")
-    harmonic_limit = max_harmonic_units or 1.0
-    margin_target = min_margin_percent or 1.0
+    prefer_radial_design = bool(result.radial_archive)
 
-    def score(index: int) -> tuple[float, float, int, int]:
-        return _candidate_score(result.candidates[index], harmonic_limit, margin_target)
+    def score(index: int) -> tuple[float, float, float, int, int]:
+        return _candidate_score(
+            candidates[index],
+            max_harmonic_units,
+            min_margin_percent,
+            prefer_radial_design=prefer_radial_design,
+        )
 
-    return min(range(len(result.candidates)), key=score)
+    return min(range(len(candidates)), key=score)
+
+
+def selection_candidates(result: ParetoResult) -> tuple[ParetoCandidate, ...]:
+    """Return certified EM-front and radial-archive candidates without duplicates."""
+
+    # Preserve the Pareto archive verbatim: callers may intentionally compare
+    # independently evaluated points that share geometry. Deduplicate only the
+    # secondary archive against already selectable designs.
+    selected = list(result.candidates)
+    seen = {_candidate_design_key(candidate.design) for candidate in selected}
+    for candidate in result.radial_archive:
+        key = _candidate_design_key(candidate.design)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(candidate)
+    return tuple(selected)
 
 
 def diverse_candidate_indices(
@@ -109,26 +136,31 @@ def diverse_candidate_indices(
     max_designs: int = 10,
     max_harmonic_units: float | None,
     min_margin_percent: float | None,
+    prefer_radial_design: bool = False,
 ) -> tuple[int, ...]:
     """Select the best candidate from each topology family, quality-ranked."""
 
     if max_designs <= 0 or not candidates:
         return ()
-    harmonic_limit = max_harmonic_units or 1.0
-    margin_target = min_margin_percent or 1.0
     grouped: dict[tuple[int, ...], list[int]] = {}
     for index, candidate in enumerate(candidates):
         grouped.setdefault(_topology_signature(candidate.design), []).append(index)
     for indices in grouped.values():
         indices.sort(
             key=lambda index: _candidate_score(
-                candidates[index], harmonic_limit, margin_target
+                candidates[index],
+                max_harmonic_units,
+                min_margin_percent,
+                prefer_radial_design=prefer_radial_design,
             )
         )
     family_order = sorted(
         grouped,
         key=lambda family: _candidate_score(
-            candidates[grouped[family][0]], harmonic_limit, margin_target
+            candidates[grouped[family][0]],
+            max_harmonic_units,
+            min_margin_percent,
+            prefer_radial_design=prefer_radial_design,
         ),
     )
     return tuple(grouped[family][0] for family in family_order[:max_designs])
@@ -243,9 +275,7 @@ def candidate_document(
         # the worst residual from the requested per-harmonic target.
         "worst_harmonic_units": candidate.objectives[0],
         "worst_harmonic_residual_units": candidate.objectives[0],
-        "harmonic_targets": {
-            f"b{order}": target for order, target in candidate.harmonic_targets
-        },
+        "harmonic_targets": {f"b{order}": target for order, target in candidate.harmonic_targets},
         "minimum_margin_percent": minimum_margin,
         "topology_family": _topology_family(candidate.design),
         "total_turns": _total_turns(candidate.design),
@@ -255,20 +285,14 @@ def candidate_document(
                 "absolute difference between the central cable polar angle and "
                 "its cable-frame angle, modulo 180 degrees"
             ),
-            "adjustable_blocks_rms_deviation_deg": (
-                adjustable_radial_alignment.rms_deviation_deg
-            ),
-            "adjustable_blocks_max_deviation_deg": (
-                adjustable_radial_alignment.max_deviation_deg
-            ),
+            "adjustable_blocks_rms_deviation_deg": (adjustable_radial_alignment.rms_deviation_deg),
+            "adjustable_blocks_max_deviation_deg": (adjustable_radial_alignment.max_deviation_deg),
             "all_blocks_rms_deviation_deg": radial_alignment.rms_deviation_deg,
             "blocks": [
                 {
                     "layer": row.layer_index + 1,
                     "block_in_layer": row.block_index + 1,
-                    "center_turns": [
-                        turn_index + 1 for turn_index in row.center_turn_indices
-                    ],
+                    "center_turns": [turn_index + 1 for turn_index in row.center_turn_indices],
                     "center_phi_deg": row.center_phi_deg,
                     "center_alpha_deg": row.center_alpha_deg,
                     "deviation_deg": row.deviation_deg,
@@ -343,12 +367,13 @@ def export_campaign_results(
 ) -> ResultArtifacts:
     """Write the final cross-section, block table, and Pareto archive."""
 
-    if not result.candidates:
+    candidates = selection_candidates(result)
+    if not candidates:
         raise ValueError("cannot export an empty certified candidate archive")
-    if best_index < 0 or best_index >= len(result.candidates):
+    if best_index < 0 or best_index >= len(candidates):
         raise IndexError("best_index is outside the candidate archive")
     output_dir.mkdir(parents=True, exist_ok=True)
-    best = result.candidates[best_index]
+    best = candidates[best_index]
     documents = [
         candidate_document(
             candidate,
@@ -356,7 +381,7 @@ def export_campaign_results(
             reference_radius_mm=reference_radius_mm,
             conductor_labels=conductor_labels,
         )
-        for candidate in result.candidates
+        for candidate in candidates
     ]
 
     best_json = output_dir / "best_candidate.json"
@@ -372,12 +397,15 @@ def export_campaign_results(
                 "candidates": documents,
                 "shortlisted_candidate_indices": list(
                     diverse_candidate_indices(
-                        result.candidates,
+                        candidates,
                         max_designs=10,
                         max_harmonic_units=max_harmonic_units,
                         min_margin_percent=min_margin_percent,
+                        prefer_radial_design=bool(result.radial_archive),
                     )
                 ),
+                "electromagnetic_pareto_candidate_count": len(result.candidates),
+                "radial_archive_candidate_count": len(result.radial_archive),
                 "near_feasible": _near_feasible_documents(result, conductor_labels),
                 "search_front": _search_front_documents(result, conductor_labels),
             },
@@ -416,13 +444,18 @@ def export_campaign_results(
     ).savefig(pareto_frontier_png, dpi=180)
     shortlist_manifest, selected_designs_dir = _export_design_shortlist(
         output_dir,
-        result.candidates,
+        candidates,
         campaign_name=campaign_name,
         reference_radius_mm=reference_radius_mm,
         conductor_labels=conductor_labels,
         max_harmonic_units=max_harmonic_units,
         min_margin_percent=min_margin_percent,
-        source="certified_pareto_archive",
+        source=(
+            "certified_pareto_and_radial_archives"
+            if result.radial_archive
+            else "certified_pareto_archive"
+        ),
+        prefer_radial_design=bool(result.radial_archive),
     )
     return ResultArtifacts(
         best_candidate_json=best_json,
@@ -496,6 +529,7 @@ def _export_design_shortlist(
     min_margin_percent: float | None,
     source: str,
     max_designs: int = 10,
+    prefer_radial_design: bool = False,
 ) -> tuple[Path, Path]:
     """Write one flat folder of best-per-topology engineering design sheets."""
 
@@ -504,6 +538,7 @@ def _export_design_shortlist(
         max_designs=max_designs,
         max_harmonic_units=max_harmonic_units,
         min_margin_percent=min_margin_percent,
+        prefer_radial_design=prefer_radial_design,
     )
     selected_dir = output_dir / "best_topology_designs"
     selected_dir.mkdir(parents=True, exist_ok=True)
@@ -636,8 +671,7 @@ def candidate_summary_figure(
         cross_section_axes,
         candidate.design,
         title=(
-            f"Cross-section | {document['total_turns']} turns, "
-            f"{document['total_blocks']} blocks"
+            f"Cross-section | {document['total_turns']} turns, {document['total_blocks']} blocks"
         ),
     )
 
@@ -768,9 +802,7 @@ def _near_feasible_documents(
                 "worst_harmonic_residual_units": item.search_objectives[0],
                 "minimum_margin_percent": -item.search_objectives[1],
             },
-            "harmonic_targets": {
-                f"b{order}": target for order, target in item.harmonic_targets
-            },
+            "harmonic_targets": {f"b{order}": target for order, target in item.harmonic_targets},
             "blocks": [
                 block_geometry_record(row)
                 for row in block_geometry_rows(item.design, conductor_labels)
@@ -814,6 +846,8 @@ def _pareto_frontier_figure(
     if not points:
         points = list(result.candidates)
     if not points:
+        points = list(result.radial_archive)
+    if not points:
         points = [
             ParetoCandidate(
                 genome=item.genome,
@@ -853,6 +887,18 @@ def _pareto_frontier_figure(
                 s=95,
                 label="Certified target-feasible",
                 zorder=3,
+            )
+        if result.radial_archive:
+            axes.scatter(
+                [candidate.objectives[0] for candidate in result.radial_archive],
+                [-candidate.objectives[1] for candidate in result.radial_archive],
+                marker="D",
+                facecolors="none",
+                edgecolors="#7c3aed",
+                linewidths=1.25,
+                s=70,
+                label="Certified radial archive",
+                zorder=4,
             )
     else:
         axes.text(
@@ -908,20 +954,54 @@ def _topology_family(design: DipoleDesign) -> str:
 
 def _candidate_score(
     candidate: ParetoCandidate,
-    harmonic_limit: float,
-    margin_target: float,
-) -> tuple[float, float, int, int]:
+    harmonic_limit: float | None,
+    margin_target: float | None,
+    *,
+    prefer_radial_design: bool = False,
+) -> tuple[float, float, float, int, int]:
     harmonic = candidate.objectives[0]
     margin = -candidate.objectives[1]
-    harmonic_ratio = harmonic / harmonic_limit
-    margin_ratio = margin / margin_target
-    violation = max(0.0, harmonic_ratio - 1.0) + max(0.0, 1.0 - margin_ratio)
+    harmonic_scale = harmonic_limit or max(abs(harmonic), 1.0)
+    margin_scale = margin_target or max(abs(margin), 1.0)
+    harmonic_ratio = harmonic / harmonic_scale
+    margin_ratio = margin / margin_scale
+    violation = (max(0.0, harmonic_ratio - 1.0) if harmonic_limit is not None else 0.0) + (
+        max(0.0, 1.0 - margin_ratio) if margin_target is not None else 0.0
+    )
     tradeoff = harmonic_ratio + 1.0 / max(margin_ratio, 1.0e-12)
+    radiality = (
+        radiality_summary(
+            candidate.design,
+            include_midplane_blocks=False,
+        ).rms_deviation_deg
+        if prefer_radial_design and violation <= 1.0e-12
+        else 0.0
+    )
     return (
         violation,
+        radiality,
         tradeoff,
         _total_turns(candidate.design),
         _total_blocks(candidate.design),
+    )
+
+
+def _candidate_design_key(design: DipoleDesign) -> tuple[object, ...]:
+    return tuple(
+        value
+        for layer in design.layers
+        for value in (
+            round(layer.inner_radius_mm, 8),
+            *(
+                item
+                for block in layer.blocks
+                for item in (
+                    round(block.phi_deg, 8),
+                    round(block.alpha_deg, 8),
+                    block.n_turns,
+                )
+            ),
+        )
     )
 
 

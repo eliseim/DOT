@@ -328,9 +328,15 @@ def result_document(
         "search_fidelity": asdict(campaign.targets.search_fidelity),
         "certification_fidelity": asdict(campaign.targets.certification_fidelity),
         "candidate_count": len(result.candidates),
+        "electromagnetic_pareto_candidate_count": len(result.candidates),
+        "radial_archive_candidate_count": len(result.radial_archive),
         "candidates": [
             _candidate_document(index, candidate)
             for index, candidate in enumerate(result.candidates)
+        ],
+        "radial_archive": [
+            _candidate_document(index, candidate)
+            for index, candidate in enumerate(result.radial_archive)
         ],
         "near_feasible": [
             {

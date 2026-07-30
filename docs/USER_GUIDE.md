@@ -86,10 +86,13 @@ cable-frame angle. Active blocks form a contiguous sequence from midplane to pol
 6. **Select survivors.** Feasible candidates are sorted into non-dominated fronts. Crowding
    distance preserves a spread along the harmonic-margin trade-off. A small family quota prevents
    one active-block topology from eliminating all alternatives too early.
-7. **Apply the optional radial preference.** Only after target-met candidates persist for three
-   consecutive generations, DOT uses 5% of later offspring as radial trials. It changes only
-   the free `alpha` angles, reapplies the complete geometry repair, and retains at most one
-   radial exemplar from the best available Pareto rank. Fixed midplane blocks are unchanged.
+7. **Apply the optional radial preference.** Every target-met layout can enter a separate
+   persistent archive even when it is electromagnetically dominated by another target-met
+   layout. After that archive has existed for three reproduction cycles, DOT uses 5% of later
+   offspring as trials seeded from its elites. Each trial gradually changes one free block's
+   `phi` and `alpha`, keeps its turns and topology fixed, reapplies the complete geometry repair,
+   and is used only if exact geometry passes and radial RMS improves. Fixed midplane blocks are
+   unchanged.
 
 Geometry, current, and optional turn budgets are hard constraints during every generation.
 Harmonic and margin targets remain objectives during the search, so promising trade-offs are not
@@ -147,7 +150,9 @@ short hardware check.
 The radial-block option is also off by default. Enable it when winding-friendly radial blocks are
 desirable and the campaign is expected to reach its electromagnetic targets before the final
 generation. Candidate JSON files and summary images report the RMS and maximum central-cable
-alignment deviation for the free-angle blocks.
+alignment deviation for the free-angle blocks. At completion DOT still requires every target;
+among certified target-met candidates it then compares radial alignment before extra harmonic or
+margin improvement.
 
 ## 6. Read the results
 
@@ -164,7 +169,7 @@ Each run creates a new timestamped directory. The most useful files are:
 | `best_candidate_geometry.csv` | Per-block `R`, turns, `phi`, and `alpha` |
 | `final_pareto_frontier.png` | Harmonic-margin trade-off, colored by total turns |
 | `best_topology_designs/` | Up to ten strong designs with distinct block topologies |
-| `pareto_candidates.json` | Certified front, search front, and near-feasible diagnostics |
+| `pareto_candidates.json` | Certified selectable pool, electromagnetic front, radial archive, search front, and near-feasible diagnostics |
 
 No certified candidate means that no final archived point passed every target during the final
 verification. Inspect the near-feasible violations before increasing population or generations:

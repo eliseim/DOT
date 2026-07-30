@@ -54,7 +54,7 @@ The optimizer has no reference-magnet block locations or turn allocation. It sea
 
 ### 1.1 What a campaign returns
 
-A successful campaign returns a certified Pareto archive, not merely one scalar optimum. Every retained design satisfies all declared geometric constraints, turn budgets, operating-current bounds, harmonic residual limit, and minimum margin during final verification. The GUI selects one representative for immediate display, while the archive and final Pareto plot preserve the trade-off set.
+A successful campaign returns a certified electromagnetic Pareto archive, not merely one scalar optimum. Every retained design satisfies all declared geometric constraints, turn budgets, operating-current bounds, harmonic residual limit, and minimum margin during final verification. With the radial option enabled, DOT can additionally retain a separate certified target-met radial archive. The GUI selects one representative for immediate display, while the final Pareto plot keeps the electromagnetic trade-off distinct from the radial markers.
 
 If no design passes every acceptance target, DOT says so explicitly. It saves the final search front and the closest candidates with named normalized violations. These are diagnostic designs, not certified designs.
 
@@ -592,33 +592,38 @@ The GUI can enable a secondary preference for winding-friendly radial blocks. Fo
 
 The option is deliberately gated and cannot replace the electromagnetic search:
 
-1. it remains inactive until hard-feasible target-met candidates persist for three consecutive generations;
-2. after activation, only 5 percent of offspring are used as radial trials;
-3. a trial changes only free non-midplane `alpha` genes;
-4. the complete repair chain and exact geometry checks run again;
-5. survival can preserve at most one population-wide radial exemplar, and only from the best available Pareto rank.
+1. every hard-feasible target-met candidate may enter a bounded persistent radial archive, even when another target-met candidate electromagnetically dominates it;
+2. the archive is separate from the electromagnetic Pareto front, so it does not alter non-dominated sorting;
+3. after the archive has existed for three reproduction cycles, only 5 percent of offspring are used as radial trials seeded from archived elites;
+4. one trial gradually adapts one free non-midplane block by splitting a small alignment correction between `phi` and `alpha`;
+5. turns and active-block topology must remain identical to the archived elite;
+6. the complete repair chain and exact geometry checks run again, and the trial is used only if its free-block radial RMS decreases;
+7. final verification certifies archive entries with the same immutable physics and geometry checks as the electromagnetic front.
 
-The first block of every layer is excluded from the preference because its `alpha` is fixed by the campaign definition. Bore field, harmonic residual, load-line margin, powering limits, and every geometry constraint keep precedence. With the check box off, the 1.0.0 search path is unchanged.
+The first block of every layer is excluded from the preference because its `alpha` is fixed by the campaign definition. Bore field, harmonic residual, load-line margin, powering limits, and every geometry constraint keep precedence. If certified target-met archive entries exist, final selection compares radial RMS immediately after target satisfaction and uses surplus harmonic/margin performance afterward. With the check box off, the 1.0.0 search path is unchanged.
 
 ### 10.10 One generation in operational order
 
 The effective order is:
 
-1. select parents from the current population;
-2. apply mixed-variable crossover and mutation;
-3. execute the full repair chain;
-4. if the radial option is active and a target-met parent exists, radialize a small trial subset and repeat the full repair chain;
-5. regenerate persistently invalid offspring;
-6. decode each candidate at reference current;
-7. run ground-truth geometry and turn-budget gates;
-8. solve current for the target bore field;
-9. evaluate harmonics and margins with the search calculation;
-10. calculate hard-constraint violations and the two objectives;
-11. combine parents and offspring;
-12. perform constrained non-dominated sorting, crowding, and topology-aware survival;
-13. select one live design using the search-population objectives;
-14. recompute that selected design's harmonics and block margins with the final numerical settings;
-15. update the GUI and generation archive with those recalculated values.
+1. add newly target-met members of the current population to the persistent radial archive;
+2. select parents from the current population;
+3. apply mixed-variable crossover and mutation;
+4. execute the full repair chain;
+5. when the radial archive is active, replace 5 percent of offspring with gradual `phi`/`alpha` trials seeded from its elites and repeat the full repair chain;
+6. retain a radial trial only if topology/turns are unchanged, exact geometry passes, and radial RMS improves;
+7. regenerate persistently invalid offspring;
+8. decode each candidate at reference current;
+9. run ground-truth geometry and turn-budget gates;
+10. solve current for the target bore field;
+11. evaluate harmonics and margins with the search calculation;
+12. calculate hard-constraint violations and the two objectives;
+13. combine parents and offspring;
+14. perform constrained non-dominated sorting, crowding, and topology-aware survival;
+15. add newly evaluated target-met survivors to the persistent radial archive;
+16. select one live design using the search-population objectives;
+17. recompute that selected design's harmonics and block margins with the final numerical settings;
+18. update the GUI and generation archive with those recalculated values.
 
 ### 10.11 The live best is not the final optimum
 
@@ -773,7 +778,7 @@ Set a seed for reproducibility. DOT always uses its single Pareto-search policy.
 
 **Parallel candidate evaluation** is off by default. When enabled, the GUI leaves one logical CPU free and uses at most four workers. It can accelerate large populations, but process startup, memory, and serialization overhead may outweigh the benefit for small campaigns or restricted hardware. If worker creation fails, retry with it off.
 
-**Prefer radial blocks after electromagnetic targets are met** is off by default. When enabled, the preference begins only after hard-feasible layouts inside the harmonic-margin target box persist for three generations. It changes only free block angles and keeps all electromagnetic objectives and geometry constraints ahead of radial alignment.
+**Prefer radial blocks after electromagnetic targets are met** is off by default. When enabled, target-met layouts enter a persistent archive. After the archive has existed for three reproduction cycles, a small trial subset is seeded from its elites and gradually adapts free `phi`/`alpha` angles while preserving turns and topology. All electromagnetic objectives and geometry constraints remain ahead of radial alignment.
 
 #### Step 7 - Run
 
@@ -821,7 +826,7 @@ Each GUI run creates
 | `best_candidate_summary.png` | One printable sheet with cross-section, electromagnetic results, and geometry table |
 | `best_candidate.json` | Machine-readable final harmonics, margins, current, field, and blocks |
 | `best_candidate_geometry.csv` | Per-block `R`, turns, `phi`, and `alpha` |
-| `pareto_candidates.json` | Certified archive, near-feasible diagnostics, and final search front |
+| `pareto_candidates.json` | Certified selectable pool, electromagnetic front, radial archive, near-feasible diagnostics, and final search front |
 | `final_pareto_frontier.png` | Residual versus margin, colored by total turns |
 | `best_topology_designs/` | Up to ten best designs from distinct active-block-count families |
 | `best_topology_designs/manifest.json` | Ranking, topology, metrics, certification state, and filenames |
@@ -1110,7 +1115,7 @@ The correct interpretation is: *this decoded straight-block air-core cross-secti
 
 **Numerical tolerance** - Small classifier allowance for near-contact, not a physical gap.
 
-**Pareto archive** - Certified set of non-dominated designs.
+**Pareto archive** - Certified set of electromagnetically non-dominated designs. The optional radial archive is separate and may contain target-met layouts that are electromagnetically dominated.
 
 **Pole-turn proxy** - Minimum first-layer insulated polygon distance to the pole axis; not literal curvature.
 

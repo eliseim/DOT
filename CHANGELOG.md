@@ -3,12 +3,15 @@
 ## 1.1.0 - 2026-07-29
 
 - Added an optional radial-block preference for winding-friendly layouts.
-- The preference remains inactive until a hard-feasible candidate meets the declared
-  harmonic and load-line-margin targets.
-- Once active, it steers only a small fraction of offspring by changing the free block
-  `alpha` angles, then reapplies every existing geometry repair and feasibility check.
-- Preserved at most one radial exemplar from the best available Pareto rank, so radial
-  appearance cannot replace a better electromagnetic front.
+- Added a persistent, bounded archive for target-met radial elites. Electromagnetic
+  dominance does not remove a retained elite, and the normal electromagnetic Pareto front
+  remains separate.
+- Once the archive has been available for three reproduction cycles, 5% of offspring become
+  gradual radial trials seeded from its elites. Each trial adapts one free block's `phi` and
+  `alpha`, preserves turns/topology, and must improve radial RMS after the complete geometry
+  repair and feasibility checks.
+- Final selection first requires every electromagnetic and geometric target, then compares
+  radial alignment before surplus harmonic or margin improvement.
 - Added central-cable radial-alignment measurements to candidate JSON files, summary
   images, shortlist manifests, and the final GUI result.
 - Preserved the complete audited 1.0.0 release as local tag `v1.0.0`.
