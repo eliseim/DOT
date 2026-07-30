@@ -10,7 +10,7 @@ from dot.cli import main
 from dot.optimize.runner import ParetoResult
 
 
-SAMPLE_CONFIG = Path("campaign/7T_NbTi_noiron_sample.json")
+SAMPLE_CONFIG = Path("tests/fixtures/7T_NbTi_headless.json")
 
 
 def test_sample_campaign_resolves_linked_inner_and_outer_conductors() -> None:

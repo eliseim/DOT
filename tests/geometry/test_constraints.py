@@ -282,6 +282,27 @@ def test_inter_block_gap_rejects_hand_computed_gap() -> None:
     assert violations[0].severity == pytest.approx(0.144247806, rel=0.0, abs=1.0e-6)
 
 
+def test_inter_block_gap_applies_numerical_tolerance_at_requested_boundary() -> None:
+    design = _two_block_reference_design()
+    measured = inter_block_clearances(design)[0].distance_mm
+
+    assert (
+        check_inter_block_gap(
+            design,
+            min_gap_mm=measured + 0.0049,
+            tolerance_mm=0.005,
+        )
+        == []
+    )
+    assert len(
+        check_inter_block_gap(
+            design,
+            min_gap_mm=measured + 0.0051,
+            tolerance_mm=0.005,
+        )
+    ) == 1
+
+
 def test_inter_block_clearance_reports_exact_closest_turn_pair() -> None:
     rows = inter_block_clearances(_two_block_reference_design())
 
@@ -324,15 +345,50 @@ def test_inter_block_gap_ignores_turns_from_same_block() -> None:
     assert check_inter_block_gap(design, min_gap_mm=1000.0) == []
 
 
-def test_inter_block_gap_ignores_overlapping_turns() -> None:
-    # Overlap is check_turn_non_intersection's job; check_inter_block_gap
-    # must not double-report it as an insufficient-gap violation.
+def test_inter_block_gap_rejects_overlapping_turns() -> None:
+    # A configured positive clearance must reject an overlap even when the
+    # overlap is smaller than the independent non-intersection tolerance.
     cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
     b1 = Block(phi_deg=30.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
-    b2 = Block(phi_deg=30.5, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
+    b2 = Block(phi_deg=40.0, alpha_deg=0.0, n_turns=1, cable=cable, inner_radius_mm=20.0, current_a=1.0)
     design = DipoleDesign(aperture_radius_mm=6.0, layers=(Layer(inner_radius_mm=20.0, blocks=(b1, b2)),))
 
-    assert check_inter_block_gap(design, min_gap_mm=1.0) == []
+    assert check_turn_non_intersection(design, tolerance_mm=0.005) == []
+    violations = check_inter_block_gap(design, min_gap_mm=1.0)
+
+    assert len(violations) == 1
+    assert violations[0].constraint_name == "inter_block_gap"
+    assert violations[0].severity == pytest.approx(1.0003807867, abs=1.0e-9)
+
+
+def test_inter_block_gap_rejects_saved_11t_outer_layer_regression() -> None:
+    cable = CableSpec(
+        width_inner_mm=1.53,
+        width_outer_mm=1.658,
+        height_mm=18.363,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    radius_mm = 44.15255001214963
+    blocks = (
+        Block(0.194650906011, 0.0, 14, cable, radius_mm, 1.0),
+        Block(34.566638189406, 13.562600337392, 11, cable, radius_mm, 1.0),
+    )
+    design = DipoleDesign(
+        aperture_radius_mm=25.0,
+        layers=(Layer(inner_radius_mm=radius_mm, blocks=blocks),),
+    )
+
+    clearance = inter_block_clearances(design)[0]
+    violations = check_inter_block_gap(
+        design,
+        min_gap_mm=1.0,
+        tolerance_mm=0.005,
+    )
+
+    assert clearance.distance_mm == pytest.approx(-0.0003134462, abs=1.0e-9)
+    assert len(violations) == 1
+    assert violations[0].severity == pytest.approx(1.0003134462, abs=1.0e-9)
 
 
 def test_feasibility_skips_inter_block_gap_when_not_configured() -> None:

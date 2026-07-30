@@ -159,6 +159,103 @@ def test_certification_enforces_minimum_and_exact_fixed_current() -> None:
     assert _certify_candidate(candidate, topology, minimum_only_targets, feasibility) is None
 
 
+def test_certification_rejects_sub_tolerance_overlap_when_block_gap_is_positive() -> None:
+    cable = CableSpec(width_mm=4.0, height_mm=2.0, insulation_thickness_mm=0.0)
+    topology = Topology(
+        aperture_radius_mm=8.0,
+        layers=(
+            LayerTopology(
+                cable_id="inner",
+                n_blocks=2,
+                inner_radius_bounds_mm=(20.0, 20.0),
+                phi_bounds_deg=(0.0, 90.0),
+                n_turns_bounds=(1, 1),
+                alpha_bounds_deg=(0.0, 0.0),
+            ),
+        ),
+        cables={"inner": cable},
+    )
+    blocks = (
+        Block(30.0, 0.0, 1, cable, 20.0, 1.0),
+        Block(40.0, 0.0, 1, cable, 20.0, 1.0),
+    )
+    candidate = ParetoCandidate(
+        genome=np.empty(0),
+        design=DipoleDesign(8.0, (Layer(20.0, blocks),)),
+        objectives=(0.0, 0.0),
+    )
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.0,
+        max_angle_deg=90.0,
+        min_layer_clearance_mm=0.0,
+        min_inter_block_gap_mm=1.0,
+        geometry_tolerance_mm=0.005,
+    )
+
+    assert _certify_candidate(candidate, topology, _targets(), feasibility) is None
+
+
+def test_ground_truth_repair_preserves_11t_outer_block_while_restoring_clearance() -> None:
+    cable = CableSpec(
+        width_inner_mm=1.53,
+        width_outer_mm=1.658,
+        height_mm=18.363,
+        insulation_radial_mm=0.145,
+        insulation_azimuthal_mm=0.145,
+    )
+    radius_mm = 44.15255001214963
+    topology = Topology(
+        aperture_radius_mm=25.0,
+        layers=(
+            LayerTopology(
+                cable_id="outer",
+                n_blocks=2,
+                min_blocks=1,
+                inner_radius_bounds_mm=(radius_mm, radius_mm),
+                phi_bounds_deg=(0.0, 90.0),
+                n_turns_bounds=(3, 14),
+                alpha_bounds_deg=(-15.0, 75.0),
+                inner_radius_mm=radius_mm,
+                first_block_phi_deg=0.194650906011,
+                first_block_alpha_deg=0.0,
+            ),
+        ),
+        cables={"outer": cable},
+    )
+    sample = {
+        "layer_0_inner_radius_mm": radius_mm,
+        "layer_0_block_0_phi_deg": 0.194650906011,
+        "layer_0_block_0_n_turns": 14,
+        "layer_0_block_1_phi_deg": 34.566638189406,
+        "layer_0_block_1_n_turns": 11,
+        "layer_0_block_1_active": True,
+        "layer_0_block_1_alpha_deg": 13.562600337392,
+    }
+    feasibility = FeasibilitySettings(
+        min_gap_mm=0.0,
+        min_layer_clearance_mm=0.0,
+        min_inter_block_gap_mm=1.0,
+        geometry_tolerance_mm=0.005,
+    )
+
+    GroundTruthRepair(topology, feasibility)._repair_sample(sample)
+    repaired = decode(flatten_mixed_genome(sample, topology), topology, topology.cables)
+    result = check_feasibility(
+        repaired,
+        aperture_radius_mm=topology.aperture_radius_mm,
+        min_gap_mm=feasibility.min_gap_mm,
+        min_layer_clearance_mm=feasibility.min_layer_clearance_mm,
+        min_inter_block_gap_mm=feasibility.min_inter_block_gap_mm,
+        geometry_tolerance_mm=feasibility.geometry_tolerance_mm,
+    )
+
+    assert result.is_feasible
+    assert sample["layer_0_block_1_active"] is True
+    assert sample["layer_0_block_0_n_turns"] == 14
+    assert sample["layer_0_block_1_n_turns"] == 11
+    assert sample["layer_0_block_1_phi_deg"] > 34.566638189406
+
+
 def test_layer_nesting_repair_shifts_outer_layer_until_nesting_clears() -> None:
     # A near-pole outer-layer block violates C10 against the inner layer's
     # pole-most conductor -- confirmed empirically (task 0043) at these

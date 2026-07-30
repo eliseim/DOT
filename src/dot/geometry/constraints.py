@@ -506,10 +506,6 @@ def _inter_block_gap_violations(
     limits = _value_by_layer(design, min_gap_mm, "min_gap_mm")
     violations: list[Violation] = []
     for clearance in inter_block_clearances(design):
-        # Positive-area overlap belongs to check_turn_non_intersection and is
-        # intentionally not double-reported as a gap violation.
-        if clearance.distance_mm < 0.0:
-            continue
         limit = limits[clearance.layer_index]
         if clearance.distance_mm < limit - tolerance_mm:
             violations.append(

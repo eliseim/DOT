@@ -623,12 +623,13 @@ class TurnBudgetRepair(Repair):
 
 
 class GroundTruthRepair(Repair):
-    """Verify repaired geometry and reduce turns/blocks until it is feasible.
+    """Verify repaired geometry and make the least destructive correction.
 
     Formula-based repairs restore ordering, packing, nesting, and turn
-    budgets. This final pass checks the actual turn polygons and greedily
-    simplifies any remaining infeasible winding. Unrepairable samples are
-    left for the problem's graded constraint handling.
+    budgets. This final pass checks the actual turn polygons, moves a free
+    block frame when that can restore clearance, and only then simplifies an
+    infeasible winding. Unrepairable samples are left for the problem's graded
+    constraint handling.
     """
 
     _MAX_ATTEMPTS = 40
@@ -658,6 +659,8 @@ class GroundTruthRepair(Repair):
             if self._repair_pole_boundary(sample, result):
                 continue
             if self._repair_aperture_boundary(sample, result):
+                continue
+            if self._repair_inter_block_clearance(sample, result):
                 continue
             if not self._shrink_worst_block(sample, result):
                 return
@@ -806,6 +809,111 @@ class GroundTruthRepair(Repair):
             return False
         _, alpha_name, proposed = best
         sample[alpha_name] = proposed
+        return True
+
+    def _repair_inter_block_clearance(
+        self,
+        sample: dict[str, float | int],
+        result,  # noqa: ANN001
+    ) -> bool:
+        """Separate an offending block pair in phi before removing conductor."""
+
+        offenders = [
+            violation
+            for violation in result.violations
+            if violation.constraint_name == "inter_block_gap"
+            and violation.layer_index is not None
+            and violation.block_index is not None
+            and violation.other_block_index is not None
+        ]
+        if not offenders:
+            return False
+
+        baseline_score = self._geometry_repair_score(result)
+        best: tuple[tuple[int, float, float], float, str, float] | None = None
+        for violation in sorted(
+            offenders,
+            key=lambda item: item.severity,
+            reverse=True,
+        ):
+            layer_index = violation.layer_index
+            left_index = self._genome_block_index(
+                sample,
+                layer_index,
+                violation.block_index,
+            )
+            right_index = self._genome_block_index(
+                sample,
+                layer_index,
+                violation.other_block_index,
+            )
+            if left_index < 0 or right_index < 0:
+                continue
+
+            radius = max(
+                0.1,
+                float(sample[f"layer_{layer_index}_inner_radius_mm"]),
+            )
+            # Convert the missing millimetres into a conservative angular
+            # displacement at the layer radius. Repeated bounded passes handle
+            # tilted/keystoned polygons for which this is only an estimate.
+            step_deg = (
+                1.1
+                * math.degrees(
+                    math.atan2(
+                        violation.severity + self.feasibility.geometry_tolerance_mm,
+                        radius,
+                    )
+                )
+                + 0.05
+            )
+            indexed_phi = [
+                (
+                    left_index,
+                    float(sample[f"layer_{layer_index}_block_{left_index}_phi_deg"]),
+                ),
+                (
+                    right_index,
+                    float(sample[f"layer_{layer_index}_block_{right_index}_phi_deg"]),
+                ),
+            ]
+            indexed_phi.sort(key=lambda item: item[1])
+            # Increase the pole-side block first; moving the midplane-side
+            # block inward is a fallback only when it is a free block.
+            proposals = (
+                (indexed_phi[1][0], 1.0),
+                (indexed_phi[0][0], -1.0),
+            )
+            for block_index, direction in proposals:
+                if block_index == 0:
+                    continue
+                phi_name = f"layer_{layer_index}_block_{block_index}_phi_deg"
+                variable = next(
+                    (item for item in self._variables if item.name == phi_name),
+                    None,
+                )
+                if variable is None:
+                    continue
+                current = float(sample[phi_name])
+                proposed = min(
+                    max(current + direction * step_deg, variable.bounds[0]),
+                    variable.bounds[1],
+                )
+                if math.isclose(proposed, current, abs_tol=1.0e-12):
+                    continue
+                probe = dict(sample)
+                probe[phi_name] = proposed
+                score = self._geometry_repair_score(self._feasibility_result(probe))
+                if score >= baseline_score:
+                    continue
+                candidate = (score, abs(proposed - current), phi_name, proposed)
+                if best is None or candidate[:2] < best[:2]:
+                    best = candidate
+
+        if best is None:
+            return False
+        _, _, phi_name, proposed = best
+        sample[phi_name] = proposed
         return True
 
     @staticmethod
