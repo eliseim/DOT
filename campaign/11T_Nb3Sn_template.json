@@ -1,0 +1,75 @@
+{
+  "acceptance": {
+    "harmonic_targets": {
+      "11": 0.0,
+      "3": 0.0,
+      "5": 0.0,
+      "7": 0.0,
+      "9": 0.0
+    },
+    "max_current_a": 21315.0,
+    "max_harmonic_units": 5.0,
+    "min_current_a": null,
+    "min_margin_percent": 20.0
+  },
+  "aperture_radius_mm": 25.0,
+  "auto_reference_radius": true,
+  "campaign_name": "11T_Nb3Sn_template",
+  "feasibility": {
+    "enforce_layer_nesting": true,
+    "geometry_tolerance_mm": 0.005,
+    "min_gap_mm": 0.0,
+    "min_inter_block_gap_mm": [
+      1.0,
+      1.0
+    ],
+    "min_layer_clearance_mm": 0.0,
+    "min_pole_turn_radius_mm": 6.5
+  },
+  "geometry_angle_convention": "native-midplane-zero",
+  "layers": [
+    {
+      "alpha_max_deg": 75.0,
+      "alpha_min_deg": -15.0,
+      "azimuthal_gap_mm": 0.15,
+      "cadata_path": "dot_cables.cadata",
+      "conductor_name": "XF145_HFM",
+      "min_blocks": 2,
+      "min_inter_block_gap_mm": 1.0,
+      "n_blocks": 4,
+      "phi_max_deg": 90.0,
+      "phi_min_deg": 0.0,
+      "turn_max": 5,
+      "turn_min": 2
+    },
+    {
+      "alpha_max_deg": 75.0,
+      "alpha_min_deg": -15.0,
+      "azimuthal_gap_mm": 0.15,
+      "cadata_path": "dot_cables.cadata",
+      "conductor_name": "XF145_HFM",
+      "min_blocks": 1,
+      "min_inter_block_gap_mm": 1.0,
+      "n_blocks": 2,
+      "phi_max_deg": 90.0,
+      "phi_min_deg": 0.0,
+      "radial_gap_mm": 0.5,
+      "turn_max": 14,
+      "turn_min": 3
+    }
+  ],
+  "max_harmonic_order": 11,
+  "n_layers": 2,
+  "nsga2": {
+    "n_gen": 200,
+    "parallel_evaluations": true,
+    "pop_size": 480,
+    "prefer_radial_design": true,
+    "preset": "Design search (recommended)",
+    "seed": 42
+  },
+  "output_dir": "../results",
+  "reference_radius_mm": 16.667,
+  "target_bore_field_t": 11.0,
+  "temperature_k": 1.9
+}

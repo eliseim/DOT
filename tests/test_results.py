@@ -27,6 +27,7 @@ from dot.results import (
     inter_block_clearance_rows,
     candidate_summary_figure,
     selection_candidates,
+    _pareto_frontier_figure,
 )
 
 
@@ -308,6 +309,25 @@ def test_export_accepts_certified_radial_archive_without_final_em_front(
     assert document["candidate_count"] == 1
     assert document["electromagnetic_pareto_candidate_count"] == 0
     assert document["radial_archive_candidate_count"] == 1
+
+
+def test_final_pareto_figure_contains_only_data_and_axis_labels() -> None:
+    result = ParetoResult(candidates=(_candidate(),))
+
+    figure = _pareto_frontier_figure(
+        result,
+        max_harmonic_units=5.0,
+        min_margin_percent=25.0,
+    )
+    axes = figure.axes[0]
+
+    assert axes.get_title() == ""
+    assert axes.get_legend() is None
+    assert axes.get_xlabel() == "Worst harmonic residual [units]"
+    assert axes.get_ylabel() == "Minimum load-line margin [%]"
+    assert len(axes.lines) == 1
+    assert figure.axes[1].get_ylabel() == "Total turns"
+    assert tuple(figure.axes[1].get_yticks()) == (3.0,)
 
 
 def test_export_no_candidate_result_is_explicit(tmp_path) -> None:  # noqa: ANN001

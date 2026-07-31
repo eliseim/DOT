@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
 
-    campaign = load_campaign(ROOT / "campaign/7T_NbTi_noiron_sample.json")
+    campaign = load_campaign(ROOT / "tests/fixtures/7T_NbTi_headless.json")
     started = time.perf_counter()
     result = run_campaign(
         campaign.topology,

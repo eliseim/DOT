@@ -37,6 +37,7 @@ acceleration = [
     "numba>=0.66,<0.67",
 ]
 dev = [
+    "build",
     "pytest",
     "ruff",
 ]

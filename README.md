@@ -1,93 +1,101 @@
 # DOT - Dipole Optimization Tool
 
-Current release: **DOT 1.1.0**.
+DOT 1.1.0 designs two-dimensional, coil-only superconducting dipole cross-sections from
+electromagnetic targets, cable data, and manufacturing constraints. It does not use a reference
+magnet layout.
 
-DOT synthesizes two-dimensional, coil-only superconducting dipole cross-sections. It combines
-cable geometry, Biot-Savart fields, multipoles, critical-current/load-line calculations,
-manufacturability checks, and one constrained NSGA-II Pareto search.
+DOT does not model iron, coil ends, stress, protection, magnetization, or three-dimensional
+effects.
 
-DOT is a pre-design tool. It does not model iron, coil ends, stress, quench protection,
-magnetization, or three-dimensional effects.
+## Install and start
 
-## Start here
+Requirements: 64-bit Python 3.11, 3.12, or 3.13 with Tcl/Tk, and an internet connection for the
+first installation.
 
-On Windows, double-click [`launch_dot_gui.cmd`](launch_dot_gui.cmd). The first launch:
+On Windows, double-click [`launch_dot_gui.cmd`](launch_dot_gui.cmd). Before creating its private
+`.venv`, the launcher lists the packages it will install and asks for approval.
 
-1. checks for 64-bit Python 3.11, 3.12, or 3.13 with Tcl/Tk;
-2. lists every package that will be installed;
-3. asks for approval;
-4. creates a private `.venv`; and
-5. opens the GUI.
-
-For a command-line or developer installation:
+Manual installation:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -e ".[acceleration,dev]"
+python -m pip install -e ".[acceleration]"
 dot gui
 ```
 
-The concise [DOT user guide](docs/USER_GUIDE.md) explains the inputs, optimization loop,
-constraints, progress display, certification, and output files. The detailed
-[technical manual](docs/manual/DOT_TECHNICAL_AND_USER_MANUAL.md) documents the physics and
-geometry conventions.
+## Start from a template
 
-The printable [DOT guide](DOT_guide.pdf) combines the workflow, operating
-instructions, and 1,000-case physics comparison in one document.
+In the GUI, select **Load Configuration** and open one of:
 
-## What the optimizer does
+- [`campaign/7T_NbTi_template.json`](campaign/7T_NbTi_template.json)
+- [`campaign/11T_Nb3Sn_template.json`](campaign/11T_Nb3Sn_template.json)
 
-Every generation follows the same loop:
+Both templates use [`campaign/dot_cables.cadata`](campaign/dot_cables.cadata), contain no
+reference block coordinates, and have produced certified layouts. Change the targets, cables,
+layer count, and design bounds for a new magnet.
 
-1. create or breed candidate block layouts;
-2. repair their discrete winding structure and packing;
-3. reject layouts that violate geometric, turn-budget, or powering constraints;
-4. compute the current needed for the requested bore field, harmonics, and load-line margins;
-5. rank candidates by two objectives: lower worst harmonic residual and higher minimum margin;
-6. preserve non-dominated candidates, objective-space diversity, and distinct block topologies.
+Each layer requires a `.cadata` file and a supported conductor selected from that file. DOT
+supports REMFIT type 1 (Nb-Ti) and type 11 (Nb3Sn) critical-current fits.
 
-When the optional radial-block preference is enabled, every target-met candidate can enter a
-separate persistent radial archive even if another target-met layout is electromagnetically
-better. After the archive has existed for three reproduction cycles, 5% of later offspring are
-seeded from its elites. A trial gradually adapts one free block's `phi` and `alpha`, keeps its
-turns and topology fixed, and is admitted only when the complete geometry checks pass and radial
-RMS improves. The normal electromagnetic Pareto front remains unchanged.
+## How DOT works
 
-After the final generation, DOT independently recalculates the non-dominated search archive
-with fixed final numerical settings. A candidate is certified only if it then meets every requested
-harmonic, margin, current, turn, and geometry limit. Electromagnetically equivalent candidates
-are tie-broken in favor of fewer turns and then fewer blocks.
-If the radial option is enabled and certified target-met archive entries exist, final selection
-compares radial alignment immediately after target satisfaction; surplus harmonic or margin
-performance is the following tie-breaker.
+The genome contains:
 
-There is no hidden weighted sum, local-refinement stage, annealed target mode, or reference-magnet
-layout in the optimization loop.
+- continuous `phi` and `alpha` angles for non-midplane blocks;
+- integer turns per block;
+- active/inactive variables for optional blocks.
 
-## Included campaign and qualification data
+`phi = 0°` is the midplane and `phi = 90°` is the pole. Layer 1 starts at the aperture; each
+outer layer starts after the requested radial gap. The azimuthal gap fixes each first-block
+`phi`, its `alpha` is zero, and DOT optimizes its turn count.
 
-[`campaign/dot_cables.cadata`](campaign/dot_cables.cadata) is the validated example conductor
-catalogue. [`campaign/7T_NbTi_noiron_sample.json`](campaign/7T_NbTi_noiron_sample.json) is a
-ready-to-run two-layer input containing electromagnetic targets and manufacturability limits,
-but no reference block layout.
+For every generation DOT:
 
-The [1,000-case DOT–ROXIE parity study](docs/validation/README.md) compares 500 two-layer and
-500 four-layer layouts. Its raw table and machine-readable summary are included. Across the
-study, the maximum bore-field deviation was 0.099%, the maximum peak-field deviation was 2.115%,
-and the maximum load-line-margin deviation was 0.604 percentage points. See the study for
-harmonic statistics and interpretation.
+1. creates candidates by sampling, crossover, and mutation;
+2. repairs block ordering, active-block continuity, turn budgets, layer radii, and nesting;
+3. constructs every insulated turn polygon and rejects collisions or insufficient clearances;
+4. solves the series current for the requested bore field;
+5. calculates harmonics, peak field, short-sample current, and load-line margin;
+6. minimizes the worst requested harmonic residual and maximizes the minimum margin with
+   constrained NSGA-II;
+7. preserves a spread of non-dominated solutions and distinct active-block topologies.
 
-Validate or smoke-test a headless campaign with:
+The enforced geometry includes aperture and midplane clearance, turn non-intersection,
+layer separation, per-layer inter-block clearance, the Layer-1 pole-turn distance, and
+two-edge layer nesting.
 
-```powershell
-dot validate campaign/7T_NbTi_noiron_sample.json
-dot optimize campaign/7T_NbTi_noiron_sample.json --quick --output results/smoke
-```
+Radial preference and parallel evaluation are enabled by default. Once a target-met layout is
+found, DOT retains target-met radial elites even if they are electromagnetically dominated.
+Later trials gradually adjust `phi` and `alpha` without changing turns or topology. Every trial
+must pass the same geometry checks.
 
-`--quick` verifies the pipeline; it is not a convergence campaign.
+After the last generation, DOT recalculates retained candidates with the final numerical
+settings. A candidate is certified only if it satisfies the declared harmonic, margin, current,
+turn, and geometry limits. Final selection compares radial alignment only after all targets are
+met.
 
-## Development checks
+## Read the result
+
+Each campaign creates a timestamped result folder containing:
+
+- `best_candidate_summary.png`: cross-section, electromagnetic results, and block table;
+- `best_candidate.json`: complete certified result;
+- `best_candidate_geometry.csv`: per-block `R`, turns, `phi`, and `alpha`;
+- `final_pareto_frontier.png`: harmonic residual versus minimum margin, colored by turns;
+- `best_topology_designs/`: certified alternatives with different block counts;
+- `campaign.json`, `run_manifest.json`, and `inputs/`: reproducibility data.
+
+If no candidate certifies, inspect `pareto_candidates.json` before increasing the search size.
+Geometry or current failures require a different design space; small harmonic or margin misses
+may require more population, generations, or blocks.
+
+## Validation and development
+
+The included 1,000-case comparison covers 500 two-layer and 500 four-layer air-core layouts.
+Maximum deviations were 0.099% for bore field, 2.115% for peak field, and 0.604 percentage
+points for load-line margin. Harmonic statistics and raw data are in
+[`docs/validation`](docs/validation).
 
 ```powershell
 python -m pytest -q
@@ -95,5 +103,5 @@ python -m ruff check .
 python -m build
 ```
 
-DOT is released under the [MIT License](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) and
-[SECURITY.md](SECURITY.md) before contributing or reporting a vulnerability.
+DOT is released under the [MIT License](LICENSE). Author: Mattia Elisei, INFN Milan and
+University of Rome La Sapienza.

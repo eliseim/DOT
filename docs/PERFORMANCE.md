@@ -16,7 +16,7 @@ boxes reject polygon pairs that provably cannot overlap before the exact collisi
 runs.
 
 Candidate repair and evaluation can additionally use one persistent `ProcessPoolExecutor`. This is
-an explicit GUI checkbox, off by default. The automatic worker count leaves one logical CPU free
+an explicit GUI checkbox, enabled by default. The automatic worker count leaves one logical CPU free
 and is capped at four based on the measured Windows crossover. The JIT kernels themselves are
 deliberately serial to avoid nested thread/process pools.
 If Numba is absent or `DOT_DISABLE_JIT=1`, the same APIs use portable Python/NumPy fallbacks.
@@ -43,7 +43,8 @@ The final four-worker result is a **337.3% throughput increase** over the origin
 (`4.373x` as fast), equivalently a **77.13% campaign-time reduction**. With the JIT kernels active,
 four processes improve this deliberately small workload by only 1.74% in elapsed time, and eight
 are slightly slower because repair remains serial and inter-process serialization is fixed cost.
-That historical result motivated keeping parallel execution optional and disabled by default.
+That historical result motivated keeping parallel execution optional so it can be disabled on
+hardware where process overhead dominates.
 
 For the representative feasible CTH candidate used during kernel profiling, one combined
 harmonic/load-line evaluation fell from 62.575 ms to 5.856 ms: 90.64% less time, or 10.69x

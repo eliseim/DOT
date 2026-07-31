@@ -241,8 +241,8 @@ PARAMETER_HELP: dict[str, str] = {
     ),
     "parallel_evaluations": (
         "Optional process parallelism for independent candidate physics evaluations. DOT leaves "
-        "one logical CPU free and uses at most four workers. It is off by default for maximum "
-        "hardware compatibility; enable it for larger populations after comparing one short run."
+        "one logical CPU free and uses at most four workers. It is enabled by default and can be "
+        "disabled on restricted hardware."
     ),
     "prefer_radial_design": (
         "Keep target-met layouts in a persistent radial archive. After three reproduction "
@@ -304,8 +304,8 @@ DEFAULT_STATE: dict[str, Any] = {
         "pop_size": NSGA2_PRESETS[DEFAULT_NSGA2_PRESET][0],
         "n_gen": NSGA2_PRESETS[DEFAULT_NSGA2_PRESET][1],
         "seed": 7,
-        "parallel_evaluations": False,
-        "prefer_radial_design": False,
+        "parallel_evaluations": True,
+        "prefer_radial_design": True,
     },
     "feasibility": {
         "min_gap_mm": 0.0,
@@ -401,8 +401,8 @@ class App(tk.Tk):
         self.pop_size_var = tk.StringVar()
         self.n_gen_var = tk.StringVar()
         self.seed_var = tk.StringVar()
-        self.parallel_evaluations_var = tk.BooleanVar(value=False)
-        self.prefer_radial_design_var = tk.BooleanVar(value=False)
+        self.parallel_evaluations_var = tk.BooleanVar(value=True)
+        self.prefer_radial_design_var = tk.BooleanVar(value=True)
         self.acceleration_status_var = tk.StringVar(value=jit_status())
         self.progress_var = tk.StringVar(value="Idle")
         self.result_var = tk.StringVar(value="No campaign has been run.")
@@ -1356,8 +1356,8 @@ class App(tk.Tk):
             "known +3-unit yoke contribution. The general harmonic limit applies to |bn-target|.\n\n"
             "4. NSGA-II Parameters: population size and generation count control how "
             "thoroughly the search explores (bigger = more thorough, slower). Optional "
-            "parallel candidate evaluation uses several processes; leave it off if the "
-            "computer is memory-constrained.\n\n"
+            "parallel candidate evaluation uses several processes and starts enabled; disable "
+            "it if the computer is memory-constrained.\n\n"
             "5. Click 'Start Campaign'. DOT clears the preceding run from the live dashboard "
             "and redraws its target lines from the values currently visible in the form. The "
             "Cross-Section Plot and Live Convergence chart "
@@ -2011,7 +2011,7 @@ class App(tk.Tk):
             min_margin_percent=float(state["acceptance"]["min_margin_percent"]),
             min_current_a=state["acceptance"].get("min_current_a"),
             max_current_a=state["acceptance"].get("max_current_a"),
-            prefer_radial_design=bool(state["nsga2"].get("prefer_radial_design", False)),
+            prefer_radial_design=bool(state["nsga2"].get("prefer_radial_design", True)),
         )
         feasibility = FeasibilitySettings(
             min_gap_mm=0.0,
@@ -2066,9 +2066,9 @@ class App(tk.Tk):
                 "pop_size": int(self.pop_size_var.get()),
                 "n_gen": int(self.n_gen_var.get()),
                 "seed": int(self.seed_var.get()) if self.seed_var.get().strip() else None,
-                "parallel_evaluations": bool(parallel_var.get()) if parallel_var else False,
+                "parallel_evaluations": bool(parallel_var.get()) if parallel_var else True,
                 "prefer_radial_design": (
-                    bool(prefer_radial_var.get()) if prefer_radial_var else False
+                    bool(prefer_radial_var.get()) if prefer_radial_var else True
                 ),
             },
             "feasibility": {
@@ -2189,10 +2189,10 @@ class App(tk.Tk):
         self.seed_var.set("" if nsga2.get("seed") is None else str(nsga2["seed"]))
         parallel_var = self.__dict__.get("parallel_evaluations_var")
         if parallel_var is not None:
-            parallel_var.set(bool(nsga2.get("parallel_evaluations", False)))
+            parallel_var.set(bool(nsga2.get("parallel_evaluations", True)))
         prefer_radial_var = self.__dict__.get("prefer_radial_design_var")
         if prefer_radial_var is not None:
-            prefer_radial_var.set(bool(nsga2.get("prefer_radial_design", False)))
+            prefer_radial_var.set(bool(nsga2.get("prefer_radial_design", True)))
         self.layer_vars = []
         for index, layer in enumerate(state["layers"]):
             merged_layer = {**DEFAULT_STATE["layers"][0], **layer}

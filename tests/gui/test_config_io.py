@@ -31,5 +31,26 @@ def test_config_round_trips_form_state(tmp_path) -> None:  # noqa: ANN001
 
     save_config(state, path)
 
-    assert load_config(path) == state
+    loaded = load_config(path)
+
+    assert loaded["output_dir"] == state["output_dir"]
+    assert loaded["layers"][0]["cadata_path"] == str(tmp_path / "inner.cadata")
+    loaded["layers"][0]["cadata_path"] = state["layers"][0]["cadata_path"]
+    assert loaded == state
+
+
+def test_config_resolves_relative_output_and_cadata_paths(tmp_path) -> None:  # noqa: ANN001
+    state = {
+        "output_dir": "../results",
+        "layers": [{"cadata_path": "cables.cadata"}],
+    }
+    config_dir = tmp_path / "campaign"
+    config_dir.mkdir()
+    path = config_dir / "template.json"
+    save_config(state, path)
+
+    loaded = load_config(path)
+
+    assert loaded["output_dir"] == str(tmp_path / "results")
+    assert loaded["layers"][0]["cadata_path"] == str(config_dir / "cables.cadata")
 

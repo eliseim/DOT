@@ -1,7 +1,10 @@
 # Changelog
 
-## 1.1.0 - 2026-07-29
+## 1.1.0 - 2026-07-31
 
+- Confirmed 1.1.0 as the publication baseline with portable Nb-Ti and Nb3Sn GUI templates.
+- Made parallel evaluation and the radial-block preference the GUI defaults.
+- Consolidated user instructions into the root README and simplified the final Pareto plot.
 - Added an optional radial-block preference for winding-friendly layouts.
 - Added a persistent, bounded archive for target-met radial elites. Electromagnetic
   dominance does not remove a retained elite, and the normal electromagnetic Pareto front

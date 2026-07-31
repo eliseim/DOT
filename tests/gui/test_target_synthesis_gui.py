@@ -158,6 +158,11 @@ def test_gui_defaults_to_accelerator_field_quality_target() -> None:
     )
 
 
+def test_gui_enables_parallel_and_radial_search_by_default() -> None:
+    assert target_synthesis_gui.DEFAULT_STATE["nsga2"]["parallel_evaluations"] is True
+    assert target_synthesis_gui.DEFAULT_STATE["nsga2"]["prefer_radial_design"] is True
+
+
 def test_cadata_conductor_drop_down_uses_exact_catalogue_names() -> None:
     cadata = Path(__file__).resolve().parents[2] / "campaign" / "dot_cables.cadata"
 

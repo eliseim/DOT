@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 
 from dot.geometry import DipoleDesign, radiality_summary
 from dot.geometry.constraints import (
@@ -842,11 +843,11 @@ def _pareto_frontier_figure(
 ) -> Figure:
     """Plot the final harmonic-margin trade-off, colored by total turns."""
 
-    points = list(result.search_front)
-    if not points:
-        points = list(result.candidates)
+    points = list(result.candidates)
     if not points:
         points = list(result.radial_archive)
+    if not points:
+        points = list(result.search_front)
     if not points:
         points = [
             ParetoCandidate(
@@ -876,63 +877,15 @@ def _pareto_frontier_figure(
             zorder=2,
         )
         colorbar = figure.colorbar(scatter, ax=axes)
-        colorbar.set_label("Total turns (lower is better)")
-        if result.candidates:
-            axes.scatter(
-                [candidate.objectives[0] for candidate in result.candidates],
-                [-candidate.objectives[1] for candidate in result.candidates],
-                facecolors="none",
-                edgecolors="#111827",
-                linewidths=1.5,
-                s=95,
-                label="Certified target-feasible",
-                zorder=3,
-            )
-        if result.radial_archive:
-            axes.scatter(
-                [candidate.objectives[0] for candidate in result.radial_archive],
-                [-candidate.objectives[1] for candidate in result.radial_archive],
-                marker="D",
-                facecolors="none",
-                edgecolors="#7c3aed",
-                linewidths=1.25,
-                s=70,
-                label="Certified radial archive",
-                zorder=4,
-            )
-    else:
-        axes.text(
-            0.5,
-            0.5,
-            "No finite hard-feasible final-search points were available",
-            ha="center",
-            va="center",
-            transform=axes.transAxes,
-        )
-
-    if max_harmonic_units is not None:
-        axes.axvline(
-            max_harmonic_units,
-            color="#c53030",
-            linestyle="--",
-            linewidth=1.1,
-            label="Harmonic target",
-        )
-    if min_margin_percent is not None:
-        axes.axhline(
-            min_margin_percent,
-            color="#2f855a",
-            linestyle="--",
-            linewidth=1.1,
-            label="Margin target",
-        )
-    axes.set_title("Final harmonic-residual / margin Pareto frontier")
-    axes.set_xlabel("Worst |normal harmonic - target| [units at reference radius]")
+        colorbar.set_label("Total turns")
+        if min(turns) == max(turns):
+            colorbar.set_ticks([turns[0]])
+        else:
+            colorbar.locator = MaxNLocator(nbins=6, integer=True)
+            colorbar.update_ticks()
+    axes.set_xlabel("Worst harmonic residual [units]")
     axes.set_ylabel("Minimum load-line margin [%]")
     axes.grid(True, alpha=0.25)
-    handles, labels = axes.get_legend_handles_labels()
-    if handles:
-        axes.legend(handles, labels, loc="best")
     return figure
 
 
