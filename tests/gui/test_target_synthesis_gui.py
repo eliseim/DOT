@@ -532,7 +532,7 @@ def test_gui_run_manifest_snapshots_conductor_files_and_runtime(tmp_path) -> Non
     snapshot = run_dir / manifest["inputs"][0]["snapshot"]
     assert snapshot.read_text(encoding="utf-8") == "CONDUCTOR TEST\n"
     assert len(manifest["inputs"][0]["sha256"]) == 64
-    assert manifest["dot_version"] == "1.1.0"
+    assert manifest["dot_version"] == "1.1.1"
     assert manifest["packages"]["numpy"]
     assert manifest["search_fidelity"]["bore_quadrature"] == "gauss-legendre"
     assert manifest["certification_fidelity"]["bore_quadrature"] == "midpoint"

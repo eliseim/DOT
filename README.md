@@ -1,6 +1,6 @@
 # DOT - Dipole Optimization Tool
 
-DOT 1.1.0 designs two-dimensional, coil-only superconducting dipole cross-sections from
+DOT 1.1.1 designs two-dimensional, coil-only superconducting dipole cross-sections from
 electromagnetic targets, cable data, and manufacturing constraints. It does not use a reference
 magnet layout.
 

@@ -269,7 +269,7 @@ def test_result_document_marks_quick_empty_archive_honestly() -> None:
     }
     assert {row["role"] for row in document["inputs"]} == {"campaign", "cadata"}
     assert all(len(row["sha256"]) == 64 for row in document["inputs"])
-    assert document["software"]["dot_version"] == "1.1.0"
+    assert document["software"]["dot_version"] == "1.1.1"
     assert document["software"]["packages"]["numpy"]
 
 

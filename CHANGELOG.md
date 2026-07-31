@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 - 2026-07-31
+
+- Restored reproducible CI after Ruff 0.16 expanded its implicit default rule set.
+- Declared DOT's lint policy explicitly and pinned the release lint toolchain.
+- Updated GitHub Actions to Node 24-based revisions and allowed every Python matrix job to finish independently.
+
 ## 1.1.0 - 2026-07-31
 
 - Confirmed 1.1.0 as the publication baseline with portable Nb-Ti and Nb3Sn GUI templates.
