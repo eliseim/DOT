@@ -26,43 +26,22 @@ dot gui
 
 ## Start from a template
 
-In the GUI, select Load Configuration and open one of the following templates:
-
-campaign/7T_NbTi_template.json
-campaign/11T_Nb3Sn_template.json
-
-Both templates use campaign/dot_cables.cadata, contain no reference block coordinates, and have successfully produced certified layouts. To design a new magnet, modify the targets, conductor assignments, number of layers, and design bounds.
-
-Each layer requires a .cadata file and a supported conductor selected from that file. DOT currently supports two critical-current-density models:
-
-Nb-Ti: Bottura fit
-Nb3Sn: HFM fit
-
-The provided .cadata file includes the LHC MB and MQXF cables. Additional conductors can be added by editing the .cadata file.
+In the GUI, select **Load Configuration** and open one of the following templates: - [`campaign/7T_NbTi_template.json`](campaign/7T_NbTi_template.json) - [`campaign/11T_Nb3Sn_template.json`](campaign/11T_Nb3Sn_template.json) Both templates use [`campaign/dot_cables.cadata`](campaign/dot_cables.cadata), contain no reference block coordinates, and have successfully produced certified layouts. To design a new magnet, modify the targets, conductor assignments, number of layers, and design bounds. Each layer requires a `.cadata` file and a supported conductor selected from that file. DOT currently supports two critical-current-density models: - **Nb-Ti:** Bottura fit - **Nb3Sn:** HFM fit The provided `.cadata` file includes the LHC MB and MQXF cables. Additional conductors can be added by editing the `.cadata` file.
 
 ## Start a new project
 
-Enter a name for the campaign and select an output folder.
+Enter a name for the campaign and select an output folder. Next, specify the main design requirements: 
+- Desired bore field 
+- Aperture radius 
+- Maximum harmonic order 
+- Number of layers 
+- Operating temperature
 
-Next, specify the main design requirements:
+For each layer, select a `.cadata` file. A default cable database is available in the `campaign` folder. You can then define: 
+- The minimum and maximum number of blocks per layer 
+- The minimum and maximum number of turns per block
 
-Desired bore field
-Aperture radius
-Maximum harmonic order
-Number of layers
-Operating temperature
-
-For each layer, select a .cadata file. A default cable database is available in the campaign folder. You can then define the minimum and maximum number of blocks per layer, as well as the minimum and maximum number of turns per block.
-
-The block clearance parameter defines the minimum separation between adjacent blocks and helps prevent overlaps.
-
-Specify the minimum distance between the y-axis and the closest cable in the first layer. When Enforce Layer Nesting is enabled, DOT automatically constructs the cross-section so that each subsequent layer remains below the previous layer.
-
-Finally, specify the harmonic targets and the minimum required load-line margin.
-
-Press Refresh Current Advice to obtain DOT's recommendation for the maximum operating current.
-
-After defining the design requirements, select the desired search effort. Larger population sizes and a greater number of generations increase the probability of finding a high-quality layout, but also increase the required computation time.
+The **block clearance** parameter defines the minimum separation between adjacent blocks and helps prevent overlaps. Specify the minimum distance between the **y-axis** and the closest cable in the first layer. When **Enforce Layer Nesting** is enabled, DOT automatically constructs the cross-section so that each subsequent layer remains below the previous layer. Finally, specify the harmonic targets and the minimum required load-line margin. Press **Refresh Current Advice** to obtain DOT's recommendation for the maximum operating current. After defining the design requirements, select the desired search effort. Larger population sizes and a greater number of generations increase the probability of finding a high-quality layout, but also increase the required computation time.
 
 ## How DOT works
 
